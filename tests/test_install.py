@@ -83,6 +83,35 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((code, snapshot(self.home), len(list(backups.iterdir()))), (0, before, count))
         self.assertIn("Already installed", out)
 
+    def test_fallback_commands_fail_closed(self):
+        # Where the hook does not run, the command file is all the model sees: it must never imply success.
+        for name, nothing in (("copy-responses", "nothing was copied"), ("ls-responses", "nothing was listed")):
+            body = (ROOT / f"integrations/claude/{name}.md").read_text().split("---", 2)[2]
+            self.assertIn("hook did not run", body)
+            self.assertIn(nothing, body)
+            self.assertNotIn("$ARGUMENTS", body)
+            for claim in ("Copied", "copied #", "Listed", "No.  Preview", "success"):
+                self.assertNotIn(claim, body)
+
+    def test_update_from_1_0_0_command_files(self):
+        v100 = "---\ndescription: {}\nargument-hint: \"{}\"\ndisable-model-invocation: true\n---\n$ARGUMENTS\n"
+        write(self.home / ".claude/commands/copy-responses.md", v100.format(
+            "Copy complete responses from this Claude Code session", "[-1..-10 | n | n1,n2-n3]"))
+        write(self.home / ".claude/commands/ls-responses.md", v100.format(
+            "List numbered complete responses from this Claude Code session", "[count]"))
+        self.assertEqual({install.sha256(p) for p in (self.home / ".claude/commands").iterdir()}, install.PREVIOUS_COMMANDS)
+        code, out = run(self.home, "--provider", "claude")
+        self.assertEqual(code, 0, out)
+        for name in ("copy-responses", "ls-responses"):
+            self.assertEqual((self.home / f".claude/commands/{name}.md").read_bytes(),
+                             (ROOT / f"integrations/claude/{name}.md").read_bytes())
+        write(self.home / ".claude/commands/ls-responses.md", v100.format(  # uninstall recognises 1.0.0 files
+            "List numbered complete responses from this Claude Code session", "[count]"))
+        write(self.home / ".claude/commands/copy-responses.md", "someone else's command")
+        self.assertEqual(run(self.home, "--uninstall")[0], 0)
+        self.assertFalse((self.home / ".claude/commands/ls-responses.md").exists())
+        self.assertEqual((self.home / ".claude/commands/copy-responses.md").read_text(), "someone else's command")
+
     def test_update_replaces_only_our_helper(self):
         self.assertEqual(run(self.home, "--provider", "both")[0], 0)
         stale = self.home / ".local/share/agent-response-history/response_history/cli.py"

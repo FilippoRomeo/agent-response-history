@@ -29,6 +29,17 @@ LEGACY_MARKERS = (
 )
 
 
+# Command files shipped by earlier releases; replaced on update, removed on uninstall.
+PREVIOUS_COMMANDS = {
+    "c1915f4633d95fd8b8f078a22e205b9fd3559807d17d200f0133bc366b60baa0",  # 1.0.0 copy-responses.md
+    "1392dd04e294a00295ed9c922ec582b64a38851af515acc069938b2e9869930f",  # 1.0.0 ls-responses.md
+}
+
+
+def own_command(src: Path, dst: Path) -> bool:
+    return dst.is_file() and (filecmp.cmp(src, dst, shallow=False) or sha256(dst) in PREVIOUS_COMMANDS)
+
+
 def release_files():
     files = [SOURCE / "run.py", SOURCE / "integrations/hook.py"]
     files += sorted(p for p in (SOURCE / "response_history").rglob("*.py") if "__pycache__" not in p.parts)
@@ -163,7 +174,7 @@ def install(paths: Paths, providers: set) -> int:
     if "claude" in providers:
         for name in COMMANDS:
             src, dst = SOURCE / "integrations/claude" / f"{name}.md", paths.claude / "commands" / f"{name}.md"
-            if dst.is_symlink() or (dst.exists() and not filecmp.cmp(src, dst, shallow=False) and not is_legacy(dst)):
+            if dst.is_symlink() or (dst.exists() and not own_command(src, dst) and not is_legacy(dst)):
                 problems.append(f"refusing to overwrite unrecognised {dst}")
             commands.append((src, dst))
     legacy, foreign = [], []
@@ -232,7 +243,7 @@ def uninstall(paths: Paths) -> int:
             tx.write_json(file, after)
     for name in COMMANDS:
         dst = paths.claude / "commands" / f"{name}.md"
-        if dst.is_file() and filecmp.cmp(SOURCE / "integrations/claude" / f"{name}.md", dst, shallow=False):
+        if not dst.is_symlink() and own_command(SOURCE / "integrations/claude" / f"{name}.md", dst):
             tx.move_aside(dst, "uninstalled command")
     if paths.core.exists() and not paths.core.is_symlink():
         tx.move_aside(paths.core, "uninstalled shared helper")

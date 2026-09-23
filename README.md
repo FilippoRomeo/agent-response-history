@@ -101,8 +101,10 @@ The hook reads the current session's local transcript, picks complete visible re
 
 Use the commands in the Claude Code and Codex terminal apps.
 
-- **Claude Code for VS Code:** not supported. In the extension (tested with 2.1.277) the hook does not run, so `/copy-responses` goes to the model as a normal prompt: it uses tokens, and the model can only retype earlier replies from memory instead of copying the originals.
+- **Claude Code for VS Code:** not supported. The extension (tested with 2.1.277) does not run the hook, so the command does nothing and Claude replies that the hook did not run. That reply is one short model turn.
 - **Codex IDE extension and desktop app:** not tested.
+
+If the hook does not run, a command never reports a copy or listing that did not happen.
 
 ## Update
 
