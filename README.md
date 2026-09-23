@@ -71,6 +71,17 @@ python3 install.py --provider both
 
 Responses are joined with a blank line. An invalid or out-of-range selection shows an error and leaves the clipboard unchanged. Only the exact command at the start of a message is intercepted; anything else, including a typo, goes to the model as usual.
 
+## Token use
+
+An exact command costs nothing: the hook answers before the model is called, so there is no model request and no tokens, and neither the command nor its output is added to the conversation. Measured with Claude Code 2.1.280 and Codex CLI 0.156.0: 0 tokens for every command.
+
+The message does reach the model, and uses tokens like any other prompt, when:
+
+- the command is mistyped (`$ls-reponses`);
+- the command is inside other text ("please run /copy-responses");
+- the Codex hook has not been trusted in `/hooks` yet, or Codex asks to trust it again after an update;
+- the client does not run the hook (see [Editors](#editors)).
+
 ## How it works
 
 The installer puts one shared Python helper in `~/.local/share/agent-response-history/` and registers it as a prompt hook:
@@ -85,6 +96,13 @@ The hook reads the current session's local transcript, picks complete visible re
 - macOS (uses `pbcopy` and `pbpaste`)
 - Python 3.10 or newer
 - Tested with Claude Code 2.1.280 and Codex CLI 0.156.0. Transcript formats can change between client versions.
+
+## Editors
+
+Use the commands in the Claude Code and Codex terminal apps.
+
+- **Claude Code for VS Code:** not supported. In the extension (tested with 2.1.277) the hook does not run, so `/copy-responses` goes to the model as a normal prompt: it uses tokens, and the model can only retype earlier replies from memory instead of copying the originals.
+- **Codex IDE extension and desktop app:** not tested.
 
 ## Update
 
@@ -112,6 +130,13 @@ Files are moved, never deleted.
 ## Replacing the older projects
 
 This project replaces [claude-response-history](https://github.com/FilippoRomeo/claude-response-history) and [codex-response-history](https://github.com/FilippoRomeo/codex-response-history). The installer recognises their installed command, skill and prompt files and moves them into the backup folder, so only one `copy-responses` and one `ls-responses` stay active. Files it does not recognise are left alone and reported.
+
+| | Older projects | agent-response-history |
+| --- | --- | --- |
+| Clients | Two repositories, one per client | One install for Claude Code, Codex, or both |
+| Running a command | Every command was a model turn, so it used tokens | A local hook answers before the model; 0 tokens |
+| Copying | No read-back check | Copies with `pbcopy`, then reads back with `pbpaste` and compares byte for byte |
+| Install | One script per project; refused to replace an existing install | One installer that moves old installs aside, updates in place, and can `--uninstall` or `--rollback` |
 
 ## Development
 
