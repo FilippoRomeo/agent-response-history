@@ -1,0 +1,1 @@
+"""Provider transcript adapters."""

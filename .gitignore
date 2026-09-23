@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.zip
+/_evidence/
+/_work/
+/.work/
+/skills-lscp-responses-handoff/
+/response_history_tests/
+/CHECKPOINT_*.md
