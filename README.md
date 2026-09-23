@@ -126,7 +126,7 @@ This covers the record types produced by the tested client versions; a future cl
 
 ## Token use
 
-Exact supported commands are handled by the hook before model inference. In tests with real Claude Code 2.1.280 and Codex CLI 0.156.0, the intercepted commands produced no model-generated assistant turn and used 0 tokens. The clients may still record a little local metadata about the intercepted prompt in their own session files.
+Exact supported commands are handled by the hook before model inference. In tests with real Claude Code 2.1.280 and Codex CLI 0.156.0 and 0.156.1, the intercepted commands produced no model-generated assistant turn and used 0 tokens. The clients may still record a little local metadata about the intercepted prompt in their own session files.
 
 The message does reach the model, and uses tokens like any other prompt, when:
 
@@ -153,7 +153,7 @@ Nothing is sent over the network. Existing settings and hooks are kept.
 
 - macOS: copying uses `pbcopy` and `pbpaste`, and storing sessions currently requires macOS
 - Python 3.10 or newer
-- Tested with Claude Code 2.1.280 and Codex CLI 0.156.0. Transcript formats can change between client versions.
+- Tested with Claude Code 2.1.280 and Codex CLI 0.156.1. Transcript formats can change between client versions.
 
 ## Editors
 
