@@ -1,8 +1,11 @@
 # Agent Response History
 
-Copy complete previous assistant responses from the current Claude Code or Codex session to the macOS clipboard, or list them with numbered previews.
+Two things for Claude Code and Codex sessions on macOS:
 
-The commands run locally before the model sees your prompt: no model request, no tokens, and the copied text never enters the conversation.
+- **Copy or list previous responses:** copy complete assistant responses from the current session to the clipboard, or list them with numbered previews.
+- **Store and retrieve sessions:** save a named local archive of the current session, then list or look up archived sessions later, per project.
+
+Exact supported commands run through a local hook before the model sees your prompt: no model request and no tokens.
 
 ## Claude Code
 
@@ -22,6 +25,13 @@ Start a new Claude Code session, then:
 
 /ls-responses
 /ls-responses 20
+
+/store-history my-session
+/store-history my-session "optional note"
+
+/retrieve-history
+/retrieve-history list
+/retrieve-history my-session
 ```
 
 ## Codex
@@ -48,7 +58,15 @@ $copy-responses 2,5-7
 
 $ls-responses
 $ls-responses 20
+
+$store-history my-session
+$store-history my-session "optional note"
+
+$retrieve-history list
+$retrieve-history my-session
 ```
+
+Codex CLI 0.156.0 note: when you type a bare `$command` with no arguments, the Codex composer opens its `$` picker and Enter does not submit the message. This was observed with `$ls-responses` and `$retrieve-history`. It is Codex composer behaviour, not a hook or model issue; commands with arguments are unaffected. Use the explicit forms instead: `$retrieve-history list`, `$ls-responses 10` (same as the default list) and `$copy-responses -1` (same as the default copy).
 
 ## Install both
 
@@ -71,9 +89,51 @@ python3 install.py --provider both
 
 Responses are joined with a blank line. An invalid or out-of-range selection shows an error and leaves the clipboard unchanged. Only the exact command at the start of a message is intercepted; anything else, including a typo, goes to the model as usual.
 
+## Stored sessions
+
+`store-history NAME` saves the current session as a local archive; `retrieve-history` finds it again later.
+
+- **Names** use only `A-Z a-z 0-9 _ -`, 1 to 64 characters, and `list` is reserved. Any other name is refused and nothing is saved.
+- **The note** is optional and goes on the same line in double quotes, for example `"Fixed the camera: "gamma" costs $5"`. The outer quotes are removed; everything between them is kept exactly as written.
+- **Existing names are never overwritten.** Storing a name that already exists in the project is refused; there is no force or overwrite option. Saves are atomic: a failed save leaves nothing behind.
+- **An archive is a snapshot** of the session at the moment you store it. A session with no complete response yet is not stored.
+
+Archives live in `~/.local/share/agent-response-history-sessions/`, separate from the installed helper:
+
+- **Scoped to the current project.** The project is the nearest folder, at or above the working directory, that contains `.git`; without one, it is the working directory itself. `retrieve-history` shows only the current project's archives.
+- **Kept across updates.** Installer updates, `--uninstall` and `--rollback` never touch this folder. Uninstalling the integration does not delete stored history.
+
+Each archive is a folder with `meta.json` (name, note, client, session ID, project, working directory, time, reply count, previews) and `replies.md`: the visible conversation, each of your prompts followed by the complete assistant reply.
+
+### Retrieving
+
+`retrieve-history` (in Codex, `$retrieve-history list`) shows the current project's archives, newest first, with client, reply count, date, and the note (or the first prompt when there is no note).
+
+`retrieve-history NAME` shows the name, client, reply count, stored date, project, note or preview, whether the original session is still available, the path to the archived `replies.md`, and a command that reopens the original session:
+
+```sh
+cd '<original cwd>' && claude --resume '<session-id>'
+cd '<original cwd>' && codex resume '<session-id>'
+```
+
+Copy the command that `retrieve-history` prints; it is already correctly quoted. If the original client session no longer exists, the detail says `Session: MISSING` and leaves out the reopen command. The archive and its `replies.md` are still there to read.
+
+## What is left out
+
+Copied responses and stored archives contain only the visible conversation. The transcript parsers leave out what they recognise as internal or client material:
+
+- hidden reasoning and thinking;
+- tool calls and tool results;
+- developer, system and meta records, sidechains and synthetic client notices;
+- unfinished or aborted assistant replies;
+- turns that ran this project's own commands;
+- known context that the client injects into prompts, such as `AGENTS.md` instructions, environment context and IDE context.
+
+This covers the record types produced by the tested client versions; a future client version may add records the parsers do not yet recognise. Text you write yourself is kept, including documents such as `<svg>…</svg>` or `<config>…</config>`.
+
 ## Token use
 
-An exact command costs nothing: the hook answers before the model is called, so there is no model request and no tokens, and neither the command nor its output is added to the conversation. Measured with Claude Code 2.1.280 and Codex CLI 0.156.0: 0 tokens for every command.
+Exact supported commands are handled by the hook before model inference. In tests with real Claude Code 2.1.280 and Codex CLI 0.156.0, the intercepted commands produced no model-generated assistant turn and used 0 tokens. The clients may still record a little local metadata about the intercepted prompt in their own session files.
 
 The message does reach the model, and uses tokens like any other prompt, when:
 
@@ -86,14 +146,19 @@ The message does reach the model, and uses tokens like any other prompt, when:
 
 The installer puts one shared Python helper in `~/.local/share/agent-response-history/` and registers it as a prompt hook:
 
-- Claude Code: a `UserPromptExpansion` hook in `~/.claude/settings.json`, plus the two command files in `~/.claude/commands/`.
-- Codex: a `UserPromptSubmit` hook in `~/.codex/hooks.json`.
+- Claude Code: a `UserPromptExpansion` hook in `~/.claude/settings.json`, plus four command files in `~/.claude/commands/` (`copy-responses`, `ls-responses`, `store-history`, `retrieve-history`).
+- Codex: a `UserPromptSubmit` hook in `~/.codex/hooks.json`. No Codex skills or prompt files are installed.
 
-The hook reads the current session's local transcript, picks complete visible replies (no reasoning, tool output, or unfinished turns), copies with `pbcopy`, and confirms the copy with `pbpaste`. Nothing is sent over the network. Existing settings and hooks are kept.
+The hook reads the current session's local transcript and picks out the complete visible replies. Then:
+
+- **copy/list:** `copy-responses` copies the selected responses with `pbcopy` and confirms the copy with `pbpaste`; `ls-responses` only prints previews and never writes the clipboard.
+- **store/retrieve:** `store-history` writes an archive under `~/.local/share/agent-response-history-sessions/`; `retrieve-history` reads only the current project's archives. Neither uses the clipboard.
+
+Nothing is sent over the network. Existing settings and hooks are kept.
 
 ## Requirements
 
-- macOS (uses `pbcopy` and `pbpaste`)
+- macOS: copying uses `pbcopy` and `pbpaste`, and storing sessions currently requires macOS
 - Python 3.10 or newer
 - Tested with Claude Code 2.1.280 and Codex CLI 0.156.0. Transcript formats can change between client versions.
 
@@ -104,7 +169,7 @@ Use the commands in the Claude Code and Codex terminal apps.
 - **Claude Code for VS Code:** not supported. The extension (tested with 2.1.277) does not run the hook, so the command does nothing and Claude replies that the hook did not run. That reply is one short model turn.
 - **Codex IDE extension and desktop app:** not tested.
 
-If the hook does not run, a command never reports a copy or listing that did not happen.
+If the hook does not run, a command never reports a copy, listing, store or retrieval that did not happen. The client may still show the command's arguments (for example a session name or note) to the model as part of that one reply.
 
 ## Update
 
@@ -113,7 +178,7 @@ git pull
 python3 install.py --provider both   # or claude / codex
 ```
 
-Re-running the installer is safe; it changes only what differs. If the hook command changes, Codex asks you to trust it again in `/hooks`.
+Re-running the installer is safe; it changes only what differs. If the hook command changes, for example because you run the installer with a different Python, Codex asks you to trust it again in `/hooks`.
 
 ## Uninstall and rollback
 
@@ -127,11 +192,13 @@ Every install or uninstall that changes something prints a backup folder under `
 python3 install.py --rollback ~/.local/share/agent-response-history-backups/<folder>
 ```
 
-Files are moved, never deleted.
+Files are moved, never deleted. Command files you have changed or written yourself are left alone.
+
+Stored sessions in `~/.local/share/agent-response-history-sessions/` are your data, not part of the installation. Install, update, uninstall and rollback leave them untouched and do not copy them into the backup folder. Delete that folder yourself if you no longer want the archives.
 
 ## Replacing the older projects
 
-This project replaces [claude-response-history](https://github.com/FilippoRomeo/claude-response-history) and [codex-response-history](https://github.com/FilippoRomeo/codex-response-history). The installer recognises their installed command, skill and prompt files and moves them into the backup folder, so only one `copy-responses` and one `ls-responses` stay active. Files it does not recognise are left alone and reported.
+This project replaces [claude-response-history](https://github.com/FilippoRomeo/claude-response-history) and [codex-response-history](https://github.com/FilippoRomeo/codex-response-history). The installer recognises their installed command, skill and prompt files and moves them into the backup folder, so only one `copy-responses` and one `ls-responses` stay active. Files it does not recognise are left alone and reported. The older projects had no stored sessions; that feature is new here.
 
 | | Older projects | agent-response-history |
 | --- | --- | --- |

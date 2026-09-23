@@ -1,12 +1,12 @@
 from response_history.model import Turn, TranscriptError
-from response_history.adapters.common import visible_parts
+from response_history.adapters.common import prompt_text, visible_parts
 
 
 def _helper(content) -> bool:
     if not isinstance(content, str):
         return False
     return any(f"<command-name>/{name}</command-name>" in content
-               for name in ("copy-responses", "ls-responses", "copy-response", "copy"))
+               for name in ("copy-responses", "ls-responses", "copy-response", "copy", "store-history", "retrieve-history"))
 
 
 def _tool_result(content) -> bool:
@@ -68,7 +68,7 @@ def parse(rows, source: str) -> list[Turn]:
                 continue
             if active is not None and active.state == "active":
                 active.state = "incomplete"
-            active = Turn("claude", source, row.get("uuid"))
+            active = Turn("claude", source, row.get("uuid"), prompt=prompt_text(content))
             pending_tools.clear()
             if _helper(content):
                 active.excluded = "helper command"

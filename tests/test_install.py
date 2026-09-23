@@ -2,6 +2,10 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +14,9 @@ import install
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ".local/share/agent-response-history/integrations/hook.py"
+SESSIONS = ".local/share/agent-response-history-sessions"
+V1_0_1 = "561b8c86dc7fb46c5a108304783319b7389f3428"
+MATCHER = "copy-responses|ls-responses|store-history|retrieve-history"
 
 
 def snapshot(home: Path) -> dict:
@@ -28,6 +35,28 @@ def run(home: Path, *args) -> tuple[int, str]:
 def ours(config: Path, event: str) -> list:
     groups = json.loads(config.read_text())["hooks"][event]
     return [g for g in groups if HOOK in json.dumps(g)]
+
+
+def sessions_state(home: Path) -> dict:
+    """Stored-session archive: every path with its mode, and file contents."""
+    root = home / SESSIONS
+    return {str(p.relative_to(root)): (stat.S_IMODE(p.lstat().st_mode), p.read_bytes() if p.is_file() else None)
+            for p in [root, *sorted(root.rglob("*"))]}
+
+
+def seed_sessions(home: Path) -> dict:
+    """User data the installer must never touch (layout written by history_store)."""
+    session = home / SESSIONS / "proj--0123456789ab" / "rocket"
+    session.mkdir(parents=True)
+    for folder in (home / SESSIONS, session.parent, session):
+        os.chmod(folder, 0o700)
+    for name, text in (("meta.json", '{"schema_version": 1, "name": "rocket"}\n'), ("replies.md", "# Session: rocket\n")):
+        (session / name).write_text(text)
+        os.chmod(session / name, 0o600)
+    (session.parent / "empty-claim").mkdir(mode=0o700)
+    state = sessions_state(home)
+    assert len(state) == 6, state
+    return state
 
 
 def write(path: Path, text: str):
@@ -58,9 +87,12 @@ class InstallTests(unittest.TestCase):
         code, out = run(self.home, "--provider", "claude")
         self.assertEqual(code, 0, out)
         self.assert_core_is_release()
-        for name in ("copy-responses", "ls-responses"):
+        for name in install.CLAUDE_COMMANDS:
             self.assertEqual((self.home / f".claude/commands/{name}.md").read_bytes(),
                              (ROOT / f"integrations/claude/{name}.md").read_bytes())
+        self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()),
+                         ["copy-responses.md", "ls-responses.md", "retrieve-history.md", "store-history.md"])
+        self.assertEqual([g["matcher"] for g in ours(self.home / ".claude/settings.json", "UserPromptExpansion")], [MATCHER])
         settings = json.loads((self.home / ".claude/settings.json").read_text())
         self.assertEqual(settings["model"], "x")
         self.assertEqual(settings["hooks"]["UserPromptSubmit"], [{"hooks": [{"type": "command", "command": "ponytail"}]}])
@@ -85,13 +117,16 @@ class InstallTests(unittest.TestCase):
 
     def test_fallback_commands_fail_closed(self):
         # Where the hook does not run, the command file is all the model sees: it must never imply success.
-        for name, nothing in (("copy-responses", "nothing was copied"), ("ls-responses", "nothing was listed")):
+        for name, nothing in (("copy-responses", "nothing was copied"), ("ls-responses", "nothing was listed"),
+                              ("store-history", "nothing was stored"), ("retrieve-history", "nothing was retrieved")):
             body = (ROOT / f"integrations/claude/{name}.md").read_text().split("---", 2)[2]
             self.assertIn("hook did not run", body)
             self.assertIn(nothing, body)
             self.assertNotIn("$ARGUMENTS", body)
-            for claim in ("Copied", "copied #", "Listed", "No.  Preview", "success"):
+            for claim in ("Copied", "copied #", "Listed", "No.  Preview", "success", "Stored ", "Reopen", "Session:"):
                 self.assertNotIn(claim, body)
+            self.assertIn("Do not run commands, read files, or repeat earlier responses.", body)
+            self.assertTrue(body.strip().splitlines()[0].startswith(f"The agent-response-history hook did not run in this client, so {nothing}"))
 
     def test_update_from_1_0_0_command_files(self):
         v100 = "---\ndescription: {}\nargument-hint: \"{}\"\ndisable-model-invocation: true\n---\n$ARGUMENTS\n"
@@ -202,6 +237,122 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(snapshot(self.home), installed)
         self.assertNotEqual(before, installed)
 
+    def test_release_file_set(self):
+        rels = {p.as_posix() for p in install.release_files()}
+        self.assertEqual(rels, {"run.py", "integrations/hook.py"} | {
+            f"response_history/{name}.py" for name in ("__init__", "cli", "clipboard", "history_store", "model", "selection", "session")} | {
+            f"response_history/adapters/{name}.py" for name in ("__init__", "claude", "codex", "common")})
+        self.assertEqual(run(self.home, "--provider", "both")[0], 0)
+        self.assert_core_is_release()  # byte-identical to the branch source; no .md, tests, caches or .git
+
+    def test_stored_sessions_survive_install_reinstall_uninstall_and_rollbacks(self):
+        sessions = seed_sessions(self.home)
+        code, out = run(self.home, "--provider", "both")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sessions_state(self.home), sessions)
+        install_backup = Path(out.split("--rollback ")[1].split(")")[0])
+        stale = self.home / ".local/share/agent-response-history/response_history/cli.py"
+        stale.write_text("old\n")  # force a real reinstall that replaces the helper tree
+        self.assertEqual(run(self.home, "--provider", "both")[0], 0)
+        self.assertEqual(sessions_state(self.home), sessions)
+        installed = snapshot(self.home)
+        code, out = run(self.home, "--uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sessions_state(self.home), sessions)
+        self.assertFalse((self.home / ".local/share/agent-response-history").exists())
+        uninstall_backup = Path(out.split("--rollback ")[1].split(")")[0])
+        backups = self.home / ".local/share/agent-response-history-backups"
+        self.assertFalse(any("rocket" in p.name or "agent-response-history-sessions" in p.name for p in backups.rglob("*")))
+        self.assertEqual(run(self.home, "--rollback", str(uninstall_backup))[0], 0)
+        self.assertEqual((snapshot(self.home), sessions_state(self.home)), (installed, sessions))
+        self.assertEqual(run(self.home, "--uninstall")[0], 0)
+        self.assertEqual(run(self.home, "--provider", "claude")[0], 0)
+        code, out = run(self.home, "--provider", "both")
+        backup = Path(out.split("--rollback ")[1].split(")")[0])
+        self.assertEqual(run(self.home, "--rollback", str(backup))[0], 0)  # rollback of an install
+        self.assertEqual(sessions_state(self.home), sessions)
+        self.assertTrue(install_backup.is_dir())
+
+    def test_new_command_names_are_never_taken_over(self):
+        for name in ("store-history", "retrieve-history"):
+            with self.subTest(name=name):
+                home = Path(self.tmp.name).resolve() / f"foreign-{name}"
+                dst = home / f".claude/commands/{name}.md"
+                # Even text carrying a legacy marker is foreign under a name the old projects never shipped.
+                write(dst, "run python3 ~/.local/share/agent-response-history/run.py for my own tool\n")
+                before = snapshot(home)
+                code, out = run(home, "--provider", "claude")
+                self.assertEqual((code, snapshot(home)), (1, before), out)
+                self.assertIn(f"refusing to overwrite unrecognised {dst}", out)
+                self.assertFalse((home / ".local/share").exists())
+                dst.unlink()
+                target = home / "elsewhere.md"
+                write(target, (ROOT / f"integrations/claude/{name}.md").read_text())  # identical bytes, still a symlink
+                dst.symlink_to(target)
+                before = snapshot(home)
+                code, out = run(home, "--provider", "both")
+                self.assertEqual((code, snapshot(home), dst.is_symlink()), (1, before, True), out)
+                self.assertFalse((home / ".local/share").exists())
+
+    def test_uninstall_leaves_modified_new_commands(self):
+        self.assertEqual(run(self.home, "--provider", "claude")[0], 0)
+        mine = self.home / ".claude/commands/store-history.md"
+        mine.write_text("my edited command\n")
+        code, out = run(self.home, "--uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(mine.read_text(), "my edited command\n")
+        self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()), ["store-history.md"])
+        self.assertEqual(json.loads((self.home / ".claude/settings.json").read_text()), {})
+
+    def test_upgrade_from_real_v1_0_1_and_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            v1 = Path(tmp) / "v1"
+            v1.mkdir()
+            archive = subprocess.run(["git", "-C", str(ROOT), "archive", V1_0_1], capture_output=True)
+            if archive.returncode:
+                self.skipTest("v1.0.1 commit unavailable (not a git checkout of agent-response-history)")
+            subprocess.run(["tar", "-x", "-C", str(v1)], input=archive.stdout, check=True)
+            write(self.home / ".claude/settings.json", json.dumps({"model": "x", "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "keep-claude"}]}]}}))
+            write(self.home / ".codex/hooks.json", json.dumps({"hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "keep-codex"}]}]}}))
+            write(self.home / ".codex/config.toml", "model = \"x\"\n")
+            old = subprocess.run([sys.executable, str(v1 / "install.py"), "--provider", "both", "--home", str(self.home)],
+                                 capture_output=True, text=True)
+            self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+            core = self.home / ".local/share/agent-response-history"
+            self.assertFalse((core / "response_history/history_store.py").exists())
+            sessions = seed_sessions(self.home)
+            v1_state = snapshot(self.home)
+            codex_hooks = (self.home / ".codex/hooks.json").read_bytes()
+            code, out = run(self.home, "--provider", "both")
+            self.assertEqual(code, 0, out)
+            self.assert_core_is_release()
+            backup = Path(out.split("--rollback ")[1].split(")")[0])
+            manifest = json.loads((backup / "MANIFEST.json").read_text())
+            self.assertEqual([e["reason"] for e in manifest["moved"]], ["previous shared helper"])
+            old_core = Path(manifest["moved"][0]["to"])
+            self.assertEqual(sorted(p.relative_to(old_core).as_posix() for p in old_core.rglob("*") if p.is_file()),
+                             sorted(p.relative_to(v1).as_posix() for p in v1.rglob("*.py")
+                                    if p.parts[len(v1.parts)] in ("response_history", "run.py") or p.relative_to(v1).as_posix() == "integrations/hook.py"))
+            for p in old_core.rglob("*.py"):
+                self.assertEqual(p.read_bytes(), (v1 / p.relative_to(old_core)).read_bytes())
+            for name in install.CLAUDE_COMMANDS:
+                self.assertEqual((self.home / f".claude/commands/{name}.md").read_bytes(),
+                                 (ROOT / f"integrations/claude/{name}.md").read_bytes())
+            settings = json.loads((self.home / ".claude/settings.json").read_text())
+            self.assertEqual([g["matcher"] for g in ours(self.home / ".claude/settings.json", "UserPromptExpansion")], [MATCHER])
+            self.assertEqual((settings["model"], settings["hooks"]["Stop"]), ("x", [{"hooks": [{"type": "command", "command": "keep-claude"}]}]))
+            self.assertEqual(len(ours(self.home / ".codex/hooks.json", "UserPromptSubmit")), 1)
+            self.assertEqual((self.home / ".codex/hooks.json").read_bytes(), codex_hooks)  # identical hook definition; nothing rewritten
+            self.assertEqual((self.home / ".codex/config.toml").read_text(), "model = \"x\"\n")
+            for path in (".codex/skills", ".codex/prompts", ".agents", ".claude/skills"):
+                self.assertFalse((self.home / path).exists(), path)
+            self.assertEqual(sessions_state(self.home), sessions)
+            code, out = run(self.home, "--rollback", str(backup))
+            self.assertEqual(code, 0, out)
+            self.assertEqual(snapshot(self.home), v1_state)
+            self.assertEqual(sessions_state(self.home), sessions)
 
 if __name__ == "__main__":
     unittest.main()

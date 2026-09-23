@@ -19,7 +19,10 @@ from datetime import datetime
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
-COMMANDS = ("copy-responses", "ls-responses")
+# Claude slash commands this release installs; the UserPromptExpansion matcher covers exactly these.
+CLAUDE_COMMANDS = ("copy-responses", "ls-responses", "store-history", "retrieve-history")
+# Names the replaced projects shipped; only these are searched for, or accepted as, legacy artifacts.
+LEGACY_COMMANDS = ("copy-responses", "ls-responses")
 # Text that only the replaced projects wrote into their command/skill files.
 LEGACY_MARKERS = (
     "response-tools/bin/response_history.py",  # claude-response-history
@@ -148,7 +151,7 @@ def hook_targets(paths: Paths, providers: set) -> list:
     targets = []
     if "claude" in providers:
         targets.append((paths.claude / "settings.json", "UserPromptExpansion",
-                        {"matcher": "|".join(COMMANDS), "hooks": [handler]}))
+                        {"matcher": "|".join(CLAUDE_COMMANDS), "hooks": [handler]}))
     if "codex" in providers:
         targets.append((paths.codex / "hooks.json", "UserPromptSubmit", {"hooks": [handler]}))
     return targets
@@ -158,11 +161,11 @@ def legacy_candidates(paths: Paths, providers: set) -> list:
     found = []
     if "claude" in providers:
         found += [paths.claude / "commands/copy-response.md"]
-        found += [paths.claude / "skills" / name for name in COMMANDS]
+        found += [paths.claude / "skills" / name for name in LEGACY_COMMANDS]
     if "codex" in providers:
-        found += [paths.codex / "skills" / name for name in COMMANDS]
-        found += [paths.codex / "prompts" / f"{name}.md" for name in COMMANDS]
-        found += [paths.home / ".agents/skills" / name for name in COMMANDS]
+        found += [paths.codex / "skills" / name for name in LEGACY_COMMANDS]
+        found += [paths.codex / "prompts" / f"{name}.md" for name in LEGACY_COMMANDS]
+        found += [paths.home / ".agents/skills" / name for name in LEGACY_COMMANDS]
     return [p for p in found if p.exists() or p.is_symlink()]
 
 
@@ -172,9 +175,10 @@ def install(paths: Paths, providers: set) -> int:
     # Plan and validate everything before changing anything.
     commands = []
     if "claude" in providers:
-        for name in COMMANDS:
+        for name in CLAUDE_COMMANDS:
             src, dst = SOURCE / "integrations/claude" / f"{name}.md", paths.claude / "commands" / f"{name}.md"
-            if dst.is_symlink() or (dst.exists() and not own_command(src, dst) and not is_legacy(dst)):
+            legacy_ok = name in LEGACY_COMMANDS and is_legacy(dst)
+            if dst.is_symlink() or (dst.exists() and not own_command(src, dst) and not legacy_ok):
                 problems.append(f"refusing to overwrite unrecognised {dst}")
             commands.append((src, dst))
     legacy, foreign = [], []
@@ -220,10 +224,12 @@ def install(paths: Paths, providers: set) -> int:
         print(line)
     print(f"Changes recorded in {backup} (undo: python3 install.py --rollback {backup})" if backup else "Already installed; nothing changed.")
     if "claude" in providers:
-        print("Claude Code: start a new session, then use /ls-responses and /copy-responses.")
+        print("Claude Code: start a new session, then use /ls-responses, /copy-responses, "
+              "/store-history NAME [\"NOTE\"] and /retrieve-history [NAME].")
     if "codex" in providers:
         print("Codex: 1. start or restart Codex  2. run /hooks  3. review and trust the "
-              "agent-response-history UserPromptSubmit hook. Until it is trusted, $copy-responses is not intercepted.")
+              "agent-response-history UserPromptSubmit hook. Until it is trusted, $copy-responses is not intercepted. "
+              "Stored sessions: $store-history NAME [\"NOTE\"], $retrieve-history list, $retrieve-history NAME.")
     return 0
 
 
@@ -241,7 +247,7 @@ def uninstall(paths: Paths) -> int:
     for file, before, after in configs:
         if after != before:
             tx.write_json(file, after)
-    for name in COMMANDS:
+    for name in CLAUDE_COMMANDS:
         dst = paths.claude / "commands" / f"{name}.md"
         if not dst.is_symlink() and own_command(SOURCE / "integrations/claude" / f"{name}.md", dst):
             tx.move_aside(dst, "uninstalled command")

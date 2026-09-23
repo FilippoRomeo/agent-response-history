@@ -10,6 +10,7 @@ class Turn:
     state: str = "active"
     evidence: str | None = None
     excluded: str | None = None
+    prompt: str = ""  # the real human prompt(s) that began this turn
 
     @property
     def selectable(self) -> bool:

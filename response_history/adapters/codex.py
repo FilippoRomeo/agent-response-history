@@ -1,9 +1,9 @@
 import re
 from response_history.model import Turn, TranscriptError
-from response_history.adapters.common import visible_parts
+from response_history.adapters.common import prompt_text, visible_parts
 
 
-_HELPER = re.compile(r"^(?:\$(?:copy-responses|ls-responses)|/(?:prompts:)?(?:copy-responses|ls-responses|copy-response|copy))(?:\s|$)")
+_HELPER = re.compile(r"^(?:\$(?:copy-responses|ls-responses|store-history|retrieve-history)|/(?:prompts:)?(?:copy-responses|ls-responses|copy-response|copy|store-history|retrieve-history))(?:\s|$)")
 _NON_TEXT_EVENTS = {
     "item_started", "token_count", "thread_settings_applied",
     "exec_command_begin", "exec_command_output_delta", "exec_command_end",
@@ -101,6 +101,7 @@ def parse(rows, source: str) -> list[Turn]:
                     active = Turn("codex", source, active.identity if active is not None and explicit else None)
                     event_messages, response_messages = {}, {}
                     turns.append(active)
+                active.prompt = "\n\n".join(filter(None, (active.prompt, prompt_text(content))))  # steering joins its turn
                 if _HELPER.match(prompt.lstrip()) or "<name>copy-responses</name>" in prompt or "<name>ls-responses</name>" in prompt or "<!-- codex-response-history:" in prompt:
                     active.excluded = "helper command"
         elif role == "assistant":

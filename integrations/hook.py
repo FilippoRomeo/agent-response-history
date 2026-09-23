@@ -16,12 +16,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from response_history.cli import main
+from response_history import history_store
 
 COMMANDS = ("copy-responses", "ls-responses")
-CODEX_COMMAND = re.compile(r"^\$(copy-responses|ls-responses)(?=$|[ \t\r\n])")
+HISTORY_COMMANDS = ("store-history", "retrieve-history")  # never touch the clipboard
+CODEX_COMMAND = re.compile(r"^\$(copy-responses|ls-responses|store-history|retrieve-history)(?=$|[ \t\r\n])")
 
 
-def _run(provider: str, name: str, selector: str, event: dict, transport) -> str:
+def _session(event: dict):
     session = event.get("session_id")
     transcript = event.get("transcript_path")
     try:
@@ -30,7 +32,24 @@ def _run(provider: str, name: str, selector: str, event: dict, transport) -> str
         if not isinstance(transcript, str) or not Path(transcript).is_absolute():
             raise ValueError
     except (TypeError, ValueError, AttributeError):
+        return None
+    return session, transcript
+
+
+def _history(provider: str, name: str, args: str, event: dict) -> str:
+    found, cwd = _session(event), event.get("cwd")
+    if found is None or not isinstance(cwd, str) or not Path(cwd).is_absolute():
         return "Response history session unavailable"
+    return history_store.run(provider, name, args, found[0], found[1], cwd)
+
+
+def _run(provider: str, name: str, selector: str, event: dict, transport) -> str:
+    if name in HISTORY_COMMANDS:
+        return _history(provider, name, selector, event)
+    found = _session(event)
+    if found is None:
+        return "Response history session unavailable"
+    session, transcript = found
     if not Path(transcript).exists():  # Claude writes the transcript only after the first exchange
         return "No responses yet."
     action = "copy" if name == "copy-responses" else "list"
@@ -58,7 +77,7 @@ def handle(event: dict, transport=None) -> dict | None:
         return {"decision": "block", "reason": reason}
     if kind == "UserPromptExpansion":  # Claude: slash args arrive as command_args
         name = event.get("command_name")
-        if name not in COMMANDS:
+        if name not in COMMANDS + HISTORY_COMMANDS:
             return None
         selector = event.get("command_args")  # Claude Code sends args here; expanded_prompt is absent
         selector = selector.strip() if isinstance(selector, str) else ""
