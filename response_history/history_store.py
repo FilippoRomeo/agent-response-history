@@ -12,11 +12,9 @@ import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from response_history.adapters import codex, claude
-from response_history.adapters.common import records
-from response_history.cli import preview
 from response_history.model import TranscriptError
 from response_history.session import resolve
+from response_history.transcript import load_turns, preview
 
 NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 STORE_ARGS = re.compile(r'(\S+)(?:[ \t]+"(.*)")?')
@@ -90,15 +88,6 @@ def _quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def _turns(provider: str, transcript: Path, session: str):
-    rows = records(transcript)
-    ids = ({r.get("payload", {}).get("id") for r in rows if r.get("type") == "session_meta" and isinstance(r.get("payload"), dict)}
-           if provider == "codex" else {r.get("sessionId") for r in rows if r.get("sessionId")})
-    if rows and ids != {session}:
-        raise TranscriptError("Session identity mismatch")
-    return [t for t in (codex if provider == "codex" else claude).parse(rows, str(transcript)) if t.selectable]
-
-
 def render(name: str, turns) -> str:
     sections = [f"# Session: {name}"]
     for turn in turns:
@@ -106,13 +95,15 @@ def render(name: str, turns) -> str:
     return "\n\n".join(sections) + "\n"
 
 
-def store(provider: str, session: str, transcript: Path, cwd: str, name: str, note: str = "", now: datetime | None = None) -> tuple[Path, int]:
+def store(provider: str, session: str, transcript: Path, cwd: str, name: str, note: str = "", now: datetime | None = None) -> tuple[Path, int, bool]:
+    """Returns (session folder, reply count, durable). Anything failing before the atomic rename
+    raises and leaves no session; after it, only durability confirmation can fail."""
     _check_name(name)
     root = project_root(cwd)
     target_parent = project_dir(root)
     if (target_parent / name).exists():
         raise HistoryError(f"A stored session named {name} already exists in this project; nothing was stored.")
-    turns = _turns(provider, transcript, session) if transcript.exists() else []
+    turns = load_turns(provider, transcript, session) if transcript.exists() else []
     if not turns:
         raise HistoryError("No responses yet; nothing was stored.")
     meta = {
@@ -143,8 +134,11 @@ def store(provider: str, session: str, transcript: Path, cwd: str, name: str, no
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    _fsync_dir(target_parent)
-    return target_parent / name, len(turns)
+    try:
+        _fsync_dir(target_parent)
+    except OSError:
+        return target_parent / name, len(turns), False  # stored and visible; durability unconfirmed
+    return target_parent / name, len(turns), True
 
 
 def _load(folder: Path) -> dict:
@@ -228,8 +222,11 @@ def run(provider: str, command: str, args: str, session: str, transcript: str, c
             match = STORE_ARGS.fullmatch(args)
             if match is None:
                 raise HistoryError(f'Usage: {prefix}store-history NAME ["NOTE"]')
-            path, count = store(provider, session, Path(transcript), cwd, match.group(1), match.group(2) or "")
-            return f"Stored {match.group(1)} ({count} replies).\n{path}"
+            path, count, durable = store(provider, session, Path(transcript), cwd, match.group(1), match.group(2) or "")
+            message = f"Stored {match.group(1)} ({count} replies).\n{path}"
+            if not durable:
+                message += "\nWarning: the session was stored, but filesystem durability could not be confirmed."
+            return message
         if args in ("", LIST):
             return listing(cwd)
         if len(args.split()) != 1:

@@ -2,19 +2,12 @@
 import argparse
 import os
 import sys
-import unicodedata
 from pathlib import Path
-from response_history.adapters import codex, claude
-from response_history.adapters.common import records
 from response_history.clipboard import copy_verified
 from response_history.model import TranscriptError
 from response_history.selection import select
 from response_history.session import resolve
-
-
-def preview(text: str) -> str:
-    safe = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text)
-    return " ".join(safe.split())[:120]
+from response_history.transcript import load_turns, preview  # noqa: F401  (preview re-exported)
 
 
 def main(argv=None, transport=copy_verified) -> int:
@@ -36,22 +29,7 @@ def main(argv=None, transport=copy_verified) -> int:
         if args.file is None and not session:
             raise ValueError("Explicit file or current session ID required")
         path = args.file or resolve(args.provider, session)
-        rows = records(path)
-        provider = args.provider
-        if provider == "auto":
-            kinds = {r.get("type") for r in rows}
-            codex_shape = bool(kinds & {"session_meta", "event_msg", "response_item"})
-            claude_shape = bool(kinds & {"user", "assistant", "bridge-session"})
-            if codex_shape == claude_shape:
-                raise TranscriptError("Ambiguous transcript provider")
-            provider = "codex" if codex_shape else "claude"
-        if session and rows:  # an empty transcript has no identity and nothing to attribute
-            ids = ({r.get("payload", {}).get("id") for r in rows if r.get("type") == "session_meta" and isinstance(r.get("payload"), dict)}
-                   if provider == "codex" else {r.get("sessionId") for r in rows if r.get("sessionId")})
-            if ids != {session}:
-                raise TranscriptError("Session identity mismatch")
-        turns = (codex if provider == "codex" else claude).parse(rows, str(path))
-        complete = [turn for turn in turns if turn.selectable]
+        complete = load_turns(args.provider, path, session)
         if not complete and args.action != "count":
             if args.action == "copy":
                 print("No responses yet.", file=sys.stderr)

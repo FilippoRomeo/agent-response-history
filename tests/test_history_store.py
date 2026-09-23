@@ -11,7 +11,6 @@ from unittest.mock import patch
 from integrations.hook import handle
 from response_history import history_store
 from response_history.adapters import codex, claude
-from response_history.cli import preview
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 23, 10, 0, tzinfo=timezone.utc)
@@ -211,8 +210,8 @@ class ParserPromptTests(Env):
 
 class StoreTests(Env):
     def test_claude_exact_files(self):
-        path, count = self.store(note="Fixed rocket")
-        self.assertEqual((path, count), (self.project() / "rocket", 2))
+        path, count, durable = self.store(note="Fixed rocket")
+        self.assertEqual((path, count, durable), (self.project() / "rocket", 2, True))
         self.assertEqual(sorted(p.name for p in path.iterdir()), ["meta.json", "replies.md"])
         self.assertEqual((path / "replies.md").read_text(encoding="utf-8"), CLAUDE_MD)
         meta = json.loads((path / "meta.json").read_bytes().decode("utf-8"))
@@ -224,7 +223,7 @@ class StoreTests(Env):
         self.assertIsNotNone(datetime.fromisoformat(meta["stored_at"]).tzinfo)
 
     def test_codex_exact_files(self):
-        path, _ = self.store("codex", "shader")
+        path, _, _ = self.store("codex", "shader")
         self.assertEqual((path / "replies.md").read_text(encoding="utf-8"), CODEX_MD)
         meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
         self.assertEqual((meta["provider"], meta["session_id"], meta["note"], meta["reply_count"]), ("codex", self.codex_sid, "", 2))
@@ -232,20 +231,20 @@ class StoreTests(Env):
 
     def test_privacy_no_leaks(self):
         for provider, name in (("claude", "rocket"), ("codex", "shader")):
-            path, _ = self.store(provider, name)
+            path, _, _ = self.store(provider, name)
             stored = (path / "replies.md").read_text() + (path / "meta.json").read_text()
             for leak in LEAKS:
                 self.assertNotIn(leak, stored, (provider, leak))
 
     def test_project_partition(self):
-        sub, _ = self.store(cwd=self.repo / "src" / "deep")
+        sub, _, _ = self.store(cwd=self.repo / "src" / "deep")
         self.assertEqual(sub.parent, self.project())
         self.assertTrue(sub.parent.name.startswith("ka--"))
         self.assertEqual(json.loads((sub / "meta.json").read_text())["cwd"], str(self.repo / "src" / "deep"))
         worktree = self.base / "wt" / "ka"
         (worktree / "a").mkdir(parents=True)
         (worktree / ".git").write_text("gitdir: elsewhere\n")  # .git file, still a root
-        other, _ = self.store(cwd=worktree / "a")
+        other, _, _ = self.store(cwd=worktree / "a")
         self.assertEqual(other.parent.name.split("--")[0], "ka")
         self.assertNotEqual(other.parent, sub.parent)  # same basename, different path
         plain = self.base / "plain" / "dir"
@@ -265,7 +264,7 @@ class StoreTests(Env):
         self.store(name="A-z_9")
 
     def test_duplicate_refused_and_original_kept(self):
-        path, _ = self.store(note="first")
+        path, _, _ = self.store(note="first")
         before = {p.name: p.read_bytes() for p in path.iterdir()}
         with self.assertRaises(history_store.HistoryError):
             self.store("codex", note="second")
@@ -299,7 +298,7 @@ class StoreTests(Env):
         self.assert_refused_leaving(target, before[0])
 
     def test_permissions(self):
-        path, _ = self.store()
+        path, _, _ = self.store()
         for folder in (history_store.store_root(), self.project(), path):
             self.assertEqual(mode(folder), 0o700, folder)
         for file in path.iterdir():
@@ -474,6 +473,68 @@ class PromptFilterTests(unittest.TestCase):
         for block in injected:
             self.assertEqual(prompt_text(block), "", block)
 
+
+class SharedLoaderTests(Env):
+    def test_load_turns_is_exactly_the_adapter_output(self):
+        from response_history import cli, transcript
+        from response_history.adapters.common import records
+        from response_history.model import TranscriptError
+        for provider, sid, path, parse in (("claude", self.claude_sid, self.claude_path, claude.parse),
+                                           ("codex", self.codex_sid, self.codex_path, codex.parse)):
+            with self.subTest(provider=provider):
+                expected = [t for t in parse(records(path), str(path)) if t.selectable]
+                self.assertEqual(transcript.load_turns(provider, path, sid), expected)
+                self.assertEqual(transcript.load_turns("auto", path, sid), expected)
+                self.assertEqual(transcript.load_turns(provider, path), expected)
+                with self.assertRaises(TranscriptError):
+                    transcript.load_turns(provider, path, str(uuid.uuid4()))
+        self.assertIs(cli.preview, transcript.preview)
+        self.assertIs(history_store.preview, transcript.preview)
+
+    def test_preview_contract_is_unchanged(self):
+        from response_history.transcript import preview
+        self.assertEqual(preview("x" * 200), "x" * 120)  # meta.json previews are capped at 120 characters
+        self.assertEqual(preview("a\tb\n\n c\x1b[2Jd"), "a b c [2Jd")  # control characters become spaces, runs collapse
+
+
+class DurabilityTests(Env):
+    def fail_fsync(self, when):
+        real = history_store._fsync_dir
+
+        def fsync(path):
+            if when(Path(path)):
+                raise OSError("fsync failed")
+            real(path)
+        return patch.object(history_store, "_fsync_dir", fsync)
+
+    def test_parent_fsync_failure_after_publish_reports_stored_with_warning(self):
+        with self.fail_fsync(lambda p: p == self.project()):
+            path, count, durable = self.store()
+            message = history_store.run("claude", "store-history", "second", self.claude_sid, str(self.claude_path), str(self.repo))
+        self.assertEqual((path, count, durable), (self.project() / "rocket", 2, False))
+        self.assertEqual((path / "replies.md").read_text(encoding="utf-8"), CLAUDE_MD)
+        self.assertEqual(json.loads((path / "meta.json").read_text(encoding="utf-8"))["reply_count"], 2)
+        self.assertEqual(message.splitlines()[0], "Stored second (2 replies).")
+        self.assertEqual(message.splitlines()[-1], "Warning: the session was stored, but filesystem durability could not be confirmed.")
+        self.assertNotIn("error", message.lower())
+        self.assertEqual(sorted(p.name for p in self.project().iterdir()), ["rocket", "second"])  # no temp dir left
+        with self.assertRaises(history_store.HistoryError):
+            self.store()  # the name is taken: no duplicate
+        self.assertIn("already exists", history_store.run("claude", "store-history", "second", self.claude_sid,
+                                                          str(self.claude_path), str(self.repo)))
+
+    def test_fsync_failure_before_publish_stores_nothing(self):
+        with self.fail_fsync(lambda p: p.name.startswith(".tmp-")):
+            with self.assertRaises(OSError):
+                self.store()
+            message = history_store.run("claude", "store-history", "rocket", self.claude_sid, str(self.claude_path), str(self.repo))
+        self.assertEqual(message, "Stored-session error: OSError")
+        self.assertEqual(list(self.project().iterdir()), [])  # no final dir, no temp dir
+        self.assertEqual(self.store()[:2], (self.project() / "rocket", 2))  # the name is still free
+
+    def test_durable_store_has_no_warning(self):
+        message = history_store.run("claude", "store-history", "rocket", self.claude_sid, str(self.claude_path), str(self.repo))
+        self.assertEqual(message, f"Stored rocket (2 replies).\n{self.project() / 'rocket'}")
 
 if __name__ == "__main__":
     unittest.main()

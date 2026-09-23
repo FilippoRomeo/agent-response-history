@@ -130,13 +130,25 @@ def load_json(path: Path) -> dict:
     return data
 
 
+def runs_hook(command, hook: Path) -> bool:
+    """Ours is exactly `<python> -I -B <hook>`, the only form any release has written.
+
+    Comparing parsed argv survives shell quoting; any other command, even one that ends
+    with our hook path, is foreign."""
+    try:
+        argv = shlex.split(command) if isinstance(command, str) else []
+    except ValueError:
+        return False  # malformed shell string: not ours
+    return len(argv) == 4 and argv[1:3] == ["-I", "-B"] and argv[3] == str(hook)
+
+
 def with_hook(data: dict, event: str, group: dict | None, hook: Path) -> dict:
     """Drop every group running our hook, then add `group` (None removes)."""
     data = json.loads(json.dumps(data))
     groups = data.setdefault("hooks", {}).setdefault(event, [])
     if not isinstance(groups, list):
         raise ValueError
-    ours = lambda g: isinstance(g, dict) and any(str(hook) in str(h.get("command", "")) for h in g.get("hooks", []) if isinstance(h, dict))
+    ours = lambda g: isinstance(g, dict) and any(runs_hook(h.get("command"), hook) for h in g.get("hooks", []) if isinstance(h, dict))
     groups[:] = [g for g in groups if not ours(g)] + ([group] if group else [])
     if not groups:
         del data["hooks"][event]

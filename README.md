@@ -7,13 +7,17 @@ Two things for Claude Code and Codex sessions on macOS:
 
 Exact supported commands run through a local hook before the model sees your prompt: no model request and no tokens.
 
-## Claude Code
+## Install
 
 ```sh
 git clone https://github.com/FilippoRomeo/agent-response-history.git
 cd agent-response-history
-python3 install.py --provider claude
+./install.sh
 ```
+
+`./install.sh` installs for every client it finds on your `PATH` (Claude Code, Codex, or both). To choose explicitly, run `./install.sh --provider claude`, `--provider codex` or `--provider both`. It needs Python 3.10 or newer and runs `install.py`, which you can also call directly with the same options, for example `python3 install.py --provider both`.
+
+## Claude Code
 
 Start a new Claude Code session, then:
 
@@ -35,12 +39,6 @@ Start a new Claude Code session, then:
 ```
 
 ## Codex
-
-```sh
-git clone https://github.com/FilippoRomeo/agent-response-history.git
-cd agent-response-history
-python3 install.py --provider codex
-```
 
 Codex runs a new hook only after you approve it:
 
@@ -66,13 +64,7 @@ $retrieve-history list
 $retrieve-history my-session
 ```
 
-Codex CLI 0.156.0 note: when you type a bare `$command` with no arguments, the Codex composer opens its `$` picker and Enter does not submit the message. This was observed with `$ls-responses` and `$retrieve-history`. It is Codex composer behaviour, not a hook or model issue; commands with arguments are unaffected. Use the explicit forms instead: `$retrieve-history list`, `$ls-responses 10` (same as the default list) and `$copy-responses -1` (same as the default copy).
-
-## Install both
-
-```sh
-python3 install.py --provider both
-```
+Codex CLI note: a bare `$command` with no arguments, whether typed or pasted, opens the Codex composer's `$` picker, and Enter does not submit the message. This was observed with `$ls-responses`, `$copy-responses` and `$retrieve-history`. It is Codex composer behaviour, not a hook or model issue; commands with arguments are unaffected. Use the explicit forms instead: `$retrieve-history list`, `$ls-responses 10` (same as the default list) and `$copy-responses -1` (same as the default copy).
 
 ## Selectors
 
@@ -97,6 +89,7 @@ Responses are joined with a blank line. An invalid or out-of-range selection sho
 - **The note** is optional and goes on the same line in double quotes, for example `"Fixed the camera: "gamma" costs $5"`. The outer quotes are removed; everything between them is kept exactly as written.
 - **Existing names are never overwritten.** Storing a name that already exists in the project is refused; there is no force or overwrite option. Saves are atomic: a failed save leaves nothing behind.
 - **An archive is a snapshot** of the session at the moment you store it. A session with no complete response yet is not stored.
+- **Durability:** if the archive was saved but the filesystem could not confirm it was written to disk, the reply still says `Stored …` and adds a warning. The archive is there; there is nothing to redo.
 
 Archives live in `~/.local/share/agent-response-history-sessions/`, separate from the installed helper:
 
@@ -175,22 +168,24 @@ If the hook does not run, a command never reports a copy, listing, store or retr
 
 ```sh
 git pull
-python3 install.py --provider both   # or claude / codex
+./install.sh
 ```
 
-Re-running the installer is safe; it changes only what differs. If the hook command changes, for example because you run the installer with a different Python, Codex asks you to trust it again in `/hooks`.
+Re-running the installer is safe; it changes only what differs. `./install.sh` reuses the Python that your existing hook runs with, so the hook command, and therefore Codex's trust, stays the same. If the hook command does change, for example because that Python no longer exists or you run `install.py` with a different one, Codex asks you to trust it again in `/hooks`.
 
 ## Uninstall and rollback
 
 ```sh
-python3 install.py --uninstall
+./install.sh --uninstall
 ```
 
 Every install or uninstall that changes something prints a backup folder under `~/.local/share/agent-response-history-backups/`. To undo that run exactly:
 
 ```sh
-python3 install.py --rollback ~/.local/share/agent-response-history-backups/<folder>
+./install.sh --rollback ~/.local/share/agent-response-history-backups/<folder>
 ```
+
+`python3 install.py --uninstall` and `python3 install.py --rollback …` do the same.
 
 Files are moved, never deleted. Command files you have changed or written yourself are left alone.
 

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -57,6 +58,18 @@ def seed_sessions(home: Path) -> dict:
     state = sessions_state(home)
     assert len(state) == 6, state
     return state
+
+
+def owned(config: Path, event: str, hook: Path) -> int:
+    """Groups running exactly `<python> -I -B <hook>`, however the path is shell-quoted."""
+    def runs(command):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+        return len(argv) == 4 and argv[1:3] == ["-I", "-B"] and argv[3] == str(hook)
+    groups = json.loads(config.read_text())["hooks"][event]
+    return sum(any(runs(h["command"]) for h in g["hooks"]) for g in groups)
 
 
 def write(path: Path, text: str):
@@ -240,7 +253,7 @@ class InstallTests(unittest.TestCase):
     def test_release_file_set(self):
         rels = {p.as_posix() for p in install.release_files()}
         self.assertEqual(rels, {"run.py", "integrations/hook.py"} | {
-            f"response_history/{name}.py" for name in ("__init__", "cli", "clipboard", "history_store", "model", "selection", "session")} | {
+            f"response_history/{name}.py" for name in ("__init__", "cli", "clipboard", "history_store", "model", "selection", "session", "transcript")} | {
             f"response_history/adapters/{name}.py" for name in ("__init__", "claude", "codex", "common")})
         self.assertEqual(run(self.home, "--provider", "both")[0], 0)
         self.assert_core_is_release()  # byte-identical to the branch source; no .md, tests, caches or .git
@@ -353,6 +366,50 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertEqual(snapshot(self.home), v1_state)
             self.assertEqual(sessions_state(self.home), sessions)
+
+    def test_hook_ownership_survives_quotes_in_paths(self):
+        # Ours is exactly `<python> -I -B <hook>` after shell parsing: quoting of a home containing '
+        # cannot hide our hook, and a foreign command that mentions or ends with it is not ours.
+        for name in ("it's home", 'home with "double" quotes and space', "plain space"):
+            with self.subTest(home=name):
+                home = Path(self.tmp.name).resolve() / name
+                hook = home / HOOK
+                others = [{"hooks": [{"type": "command", "command": "ponytail"}]},
+                          {"hooks": [{"type": "command", "command": f"echo {hook} >> log"}]},  # mentions our hook, is not ours
+                          {"hooks": [{"type": "command", "command": "python3 'unterminated"}]},  # malformed shell string
+                          {"hooks": [{"type": "command", "command": f"wrap {shlex.quote(str(hook))} --debug"}]},  # ours, not last
+                          {"hooks": [{"type": "command", "command": f"python3 {shlex.quote('/backup' + str(hook))}"}]},  # suffix only
+                          {"hooks": [{"type": "command", "command": f"echo {shlex.quote(str(hook))}"}]},  # ends with it, not ours
+                          {"hooks": [{"type": "command", "command": f"python3 -I -B {shlex.quote(str(hook))} --x"}]}]  # extra arg
+                foreign = {"UserPromptSubmit": others, "UserPromptExpansion": others, "Stop": others}
+                write(home / ".claude/settings.json", json.dumps({"model": "x", "hooks": foreign}))
+                write(home / ".codex/hooks.json", json.dumps({"hooks": foreign}))
+                code, out = run(home, "--provider", "both")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(owned(home / ".claude/settings.json", "UserPromptExpansion", hook), 1)
+                self.assertEqual(owned(home / ".codex/hooks.json", "UserPromptSubmit", hook), 1)
+                installed = {f: (home / f).read_bytes() for f in (".claude/settings.json", ".codex/hooks.json")}
+                code, out = run(home, "--provider", "both")
+                self.assertEqual(code, 0, out)
+                self.assertIn("Already installed", out)
+                self.assertEqual({f: (home / f).read_bytes() for f in installed}, installed)
+                self.assertEqual(run(home, "--uninstall")[0], 0)
+                self.assertEqual(json.loads((home / ".claude/settings.json").read_text()), {"model": "x", "hooks": foreign})
+                self.assertEqual(json.loads((home / ".codex/hooks.json").read_text()), {"hooks": foreign})
+
+    def test_hook_ownership_with_quoted_config_dirs(self):
+        # Non-isolated mode: HOME, CLAUDE_CONFIG_DIR and CODEX_HOME all contain a single quote.
+        home = Path(self.tmp.name).resolve() / "user's home"
+        env = {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / "claude's config"),
+               "CODEX_HOME": str(home / "codex's home"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for attempt in range(2):
+            r = subprocess.run([sys.executable, "-B", str(ROOT / "install.py"), "--provider", "both"],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Already installed", r.stdout)
+        self.assertEqual(owned(home / "claude's config/settings.json", "UserPromptExpansion", home / HOOK), 1)
+        self.assertEqual(owned(home / "codex's home/hooks.json", "UserPromptSubmit", home / HOOK), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
