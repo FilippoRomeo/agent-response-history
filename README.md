@@ -44,6 +44,8 @@ It needs macOS and Python 3.10 or newer. It runs `install.py`, which you can als
 
 Installing over an earlier version replaces its commands (`copy-responses`, `ls-responses`, `store-history`, `retrieve-history`) with the `history-*` family. The old command files are recognised and moved into the installer's backup folder; there is nothing to delete by hand. See [Update](#update).
 
+After upgrading, use only the `history-*` commands. The old names are not aliases: agent-response-history no longer handles them, and the client treats them like any other input.
+
 ## Commands
 
 | Command | Claude Code | Codex | What it does |
@@ -55,7 +57,9 @@ Installing over an earlier version replaces its commands (`copy-responses`, `ls-
 
 Only an exact command at the start of a message is handled. Anything else, including a typo or a command inside other text, is left to the client as usual.
 
-In Codex, give each command an argument, for example `$history-list 10`, `$history-copy -1`, `$history-use list` and `$history-store home`. With earlier versions, a bare `$command` with no arguments opened the Codex composer's `$` picker instead of sending the message. That is Codex composer behaviour; the `history-*` commands have not yet been checked for it in a release validation.
+In Codex, give each command an argument, for example `$history-list 10`, `$history-copy -1`, `$history-use list` and `$history-store home`. These are sent on the first Enter.
+
+A bare command with no arguments, such as `$history-list`, `$history-copy` or `$history-use`, opens the Codex composer's `$` picker showing "no matches", and Enter does not send it. Press Esc to close the picker: the command stays in the composer, and Enter then sends it to the hook. This is how the Codex composer handles `$` (observed with Codex CLI 0.156.1), not something this tool does.
 
 Exact output for every example below, generated from a fixed fake session, is in [docs/examples.md](docs/examples.md).
 
@@ -246,7 +250,9 @@ When the hook handles a command, the reply comes from the hook and needs no mode
 
 ## Clients
 
-This tool is built for the Claude Code and Codex terminal apps. Editor extensions and desktop apps are not part of the tested workflow.
+This tool is built for the Claude Code and Codex terminal apps. Tested with Claude Code 2.1.282 and Codex CLI 0.156.1: in those terminal-client tests, every supported `history-*` command intercepted by the hook added no model-generated assistant turn and no model token usage. That holds only when the hook intercepts the command; see [How commands are handled](#how-commands-are-handled).
+
+Editor extensions and desktop apps are not part of the tested workflow.
 
 ## Update
 
