@@ -16,11 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from response_history.cli import main
-from response_history import history_store
+from response_history import history_store, source
 
-COMMANDS = ("copy-responses", "ls-responses")
-HISTORY_COMMANDS = ("store-history", "retrieve-history")  # never touch the clipboard
-CODEX_COMMAND = re.compile(r"^\$(copy-responses|ls-responses|store-history|retrieve-history)(?=$|[ \t\r\n])")
+ACTIONS = {"history-list": "list", "history-copy": "copy"}
+COMMANDS = tuple(ACTIONS)
+HISTORY_COMMANDS = ("history-use", "history-store")  # never touch the clipboard
+CODEX_COMMAND = re.compile(r"^\$(" + "|".join(COMMANDS + HISTORY_COMMANDS) + r")(?=$|[ \t\r\n])")
 
 
 def _session(event: dict):
@@ -43,6 +44,13 @@ def _history(provider: str, name: str, args: str, event: dict) -> str:
     return history_store.run(provider, name, args, found[0], found[1], cwd)
 
 
+def _stored_selected(provider: str, session: str) -> bool:
+    try:
+        return source.selected(provider, session) is not None
+    except ValueError:
+        return True  # an unreadable selection is reported by list/copy, never treated as LIVE
+
+
 def _run(provider: str, name: str, selector: str, event: dict, transport) -> str:
     if name in HISTORY_COMMANDS:
         return _history(provider, name, selector, event)
@@ -50,9 +58,9 @@ def _run(provider: str, name: str, selector: str, event: dict, transport) -> str
     if found is None:
         return "Response history session unavailable"
     session, transcript = found
-    if not Path(transcript).exists():  # Claude writes the transcript only after the first exchange
-        return "No responses yet."
-    action = "copy" if name == "copy-responses" else "list"
+    if not Path(transcript).exists() and not _stored_selected(provider, session):
+        return "No responses yet."  # Claude writes the transcript only after the first exchange
+    action = ACTIONS[name]
     argv = ["--provider", provider, "--file", transcript, "--session", session, "--", action]
     if selector:
         argv.append(selector)
@@ -72,7 +80,7 @@ def handle(event: dict, transport=None) -> dict | None:
             return None
         tail = prompt[match.end():]
         if "\n" in tail or "\r" in tail:
-            return {"decision": "block", "reason": "Invalid response-history arguments"}
+            return {"decision": "block", "reason": "Nothing done: put the whole command on one line."}
         reason = _run("codex", match.group(1), tail.strip(), event, transport)
         return {"decision": "block", "reason": reason}
     if kind == "UserPromptExpansion":  # Claude: slash args arrive as command_args
@@ -81,7 +89,7 @@ def handle(event: dict, transport=None) -> dict | None:
             return None
         selector = event.get("command_args")  # Claude Code sends args here; expanded_prompt is absent
         selector = selector.strip() if isinstance(selector, str) else ""
-        reason = _run("claude", name, selector, event, transport) if "\n" not in selector else "Invalid response-history arguments"
+        reason = _run("claude", name, selector, event, transport) if "\n" not in selector else "Nothing done: put the whole command on one line."
         return {"decision": "block", "reason": reason}  # permissionDecision is ignored for this event
     return None
 

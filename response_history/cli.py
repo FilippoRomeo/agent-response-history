@@ -5,9 +5,10 @@ import sys
 from pathlib import Path
 from response_history.clipboard import copy_verified
 from response_history.model import TranscriptError
-from response_history.selection import select
+from response_history.selection import UserError, select
 from response_history.session import resolve
-from response_history.transcript import load_turns, preview  # noqa: F401  (preview re-exported)
+from response_history import source
+from response_history.transcript import preview  # noqa: F401  (preview re-exported)
 
 
 def main(argv=None, transport=copy_verified) -> int:
@@ -22,14 +23,14 @@ def main(argv=None, transport=copy_verified) -> int:
     args = parser.parse_args(argv)
     try:
         if args.stdout and args.action != "copy":
-            raise ValueError("--stdout requires copy")
+            raise UserError("--stdout only works with copy.")
         session = args.session
         if args.file is None and session is None:
             session = os.environ.get("CODEX_THREAD_ID") if args.provider == "codex" else os.environ.get("CLAUDE_SESSION_ID") if args.provider == "claude" else None
         if args.file is None and not session:
-            raise ValueError("Explicit file or current session ID required")
+            raise UserError("Give a transcript with --file or a session with --session.")
         path = args.file or resolve(args.provider, session)
-        complete = load_turns(args.provider, path, session)
+        complete, stored = source.load(args.provider, session, path)  # stored: name of a selected stored session, else None
         if not complete and args.action != "count":
             if args.action == "copy":
                 print("No responses yet.", file=sys.stderr)
@@ -39,18 +40,25 @@ def main(argv=None, transport=copy_verified) -> int:
             return 0
         if args.action == "count":
             if args.selector:
-                raise ValueError("count does not accept a selector")
+                raise UserError("count takes no selection.")
             if not args.quiet:
                 print(len(complete))
             return 0
         if args.action == "list":
             limit = 10
             if args.selector:
-                if not args.selector.isdecimal() or int(args.selector) < 1:
-                    raise ValueError("list requires a positive count")
-                limit = int(args.selector)
+                number = args.selector.strip()
+                number = number[1:] if number.startswith("-") else number  # -N reads like copy's "latest N"
+                hint = "Give how many of the latest responses to show, like 5 or -5."
+                if not number.isdecimal():
+                    raise UserError(f"Nothing listed: can't read {args.selector.strip()[:40]!r}. {hint}")
+                if int(number) < 1:
+                    raise UserError(f"Nothing listed: {args.selector.strip()} isn't a valid count. {hint}")
+                limit = int(number)
             if not args.quiet:
                 width = max(3, len(str(len(complete))) + 1)
+                if stored:
+                    print(f"Stored session: {stored}")
                 print(f"{'No.':<{width}}  Preview")
                 print(f"{'-' * width}  -------")
                 for n, turn in list(enumerate(complete, 1))[-limit:]:
@@ -59,7 +67,7 @@ def main(argv=None, transport=copy_verified) -> int:
                         cell = cell[:67] + "…"
                     print(f"{f'#{n}':<{width}}  {cell}")
             return 0
-        indexes = select(args.selector, len(complete))
+        indexes = select(args.selector, len(complete), "this stored session" if stored else "this session")
         payload = "\n\n".join(complete[i - 1].text for i in indexes)
         if args.stdout:
             sys.stdout.write(payload)
@@ -69,11 +77,17 @@ def main(argv=None, transport=copy_verified) -> int:
             print(f"Copy {result.status}", file=sys.stderr)
             return 3
         if not args.quiet:
-            print("Copied " + ", ".join(f"#{i}" for i in indexes))
+            print("Copied " + ", ".join(f"#{i}" for i in indexes) + (f" from stored session {stored}" if stored else ""))
         return 0
-    except (OSError, UnicodeError, ValueError, TranscriptError) as exc:
+    except UserError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except TranscriptError as exc:  # fixed messages from the parsers, never transcript text
+        print(f"Couldn't read this session's transcript ({exc}).", file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError, ValueError) as exc:
         # Do not echo exception details: filenames and transcript bodies may be private.
-        print(f"Response history error: {type(exc).__name__}", file=sys.stderr)
+        print(f"Couldn't read this session's transcript ({type(exc).__name__}).", file=sys.stderr)
         return 2
 
 

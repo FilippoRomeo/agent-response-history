@@ -20,7 +20,24 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
 # Claude slash commands this release installs; the UserPromptExpansion matcher covers exactly these.
-CLAUDE_COMMANDS = ("copy-responses", "ls-responses", "store-history", "retrieve-history")
+CLAUDE_COMMANDS = ("history-list", "history-copy", "history-store", "history-use")
+# Earlier shipped versions of a current command, keyed by that command's own name (none yet).
+PREVIOUS_VERSIONS: dict = {}
+# Commands earlier releases installed and this one retires: filename -> SHA-256 of every version
+# shipped under that exact filename. Install moves them aside; anything else there stops the install,
+# because the hook no longer answers these names and a leftover file would reach the model.
+RETIRED_COMMANDS = {
+    "copy-responses": {
+        "c1915f4633d95fd8b8f078a22e205b9fd3559807d17d200f0133bc366b60baa0",  # 1.0.0 (9f532d9)
+        "1a0241245e224eaa4bf849052070599d6b7af4280f75bffd9fdf8dfd5ca3cd81",  # v1.0.1 .. v2.1.0
+    },
+    "ls-responses": {
+        "1392dd04e294a00295ed9c922ec582b64a38851af515acc069938b2e9869930f",  # 1.0.0 (9f532d9)
+        "e3bf87f801dc55654513decd60589c9b4235c4b92f24314a118ae20cbc2ff149",  # v1.0.1 .. v2.1.0
+    },
+    "store-history": {"8945af74f2652abd51bdfb7ee45f97ec4b563da5b301c8d2dd1c6e3fee45815c"},  # v2.0.0 .. v2.1.0
+    "retrieve-history": {"c0aa5abe9feafd3d34fec07f59635efb7997d20f593480b0133721eb16690ca9"},  # v2.0.0 .. v2.1.0
+}
 # Names the replaced projects shipped; only these are searched for, or accepted as, legacy artifacts.
 LEGACY_COMMANDS = ("copy-responses", "ls-responses")
 # Text that only the replaced projects wrote into their command/skill files.
@@ -32,15 +49,18 @@ LEGACY_MARKERS = (
 )
 
 
-# Command files shipped by earlier releases; replaced on update, removed on uninstall.
-PREVIOUS_COMMANDS = {
-    "c1915f4633d95fd8b8f078a22e205b9fd3559807d17d200f0133bc366b60baa0",  # 1.0.0 copy-responses.md
-    "1392dd04e294a00295ed9c922ec582b64a38851af515acc069938b2e9869930f",  # 1.0.0 ls-responses.md
-}
+def own_command(name: str, src: Path, dst: Path) -> bool:
+    """This release's file for a current command, or a known earlier version of that same command."""
+    return not dst.is_symlink() and dst.is_file() and (
+        filecmp.cmp(src, dst, shallow=False) or sha256(dst) in PREVIOUS_VERSIONS.get(name, ()))
 
 
-def own_command(src: Path, dst: Path) -> bool:
-    return dst.is_file() and (filecmp.cmp(src, dst, shallow=False) or sha256(dst) in PREVIOUS_COMMANDS)
+def retired_command(name: str, dst: Path) -> bool:
+    """A regular file holding a version shipped under this exact retired name (or, for the two names
+    the replaced projects used, one of their marked files)."""
+    if dst.is_symlink() or not dst.is_file():
+        return False
+    return sha256(dst) in RETIRED_COMMANDS[name] or (name in LEGACY_COMMANDS and is_legacy(dst))
 
 
 def release_files():
@@ -70,6 +90,7 @@ class Paths:
         self.claude = Path(env.get("CLAUDE_CONFIG_DIR") or home / ".claude")
         self.codex = Path(env.get("CODEX_HOME") or home / ".codex")
         self.core = home / ".local/share/agent-response-history"
+        self.state = home / ".local/state/agent-response-history"  # response-source selections: tool state, not user data
         self.backups = home / ".local/share/agent-response-history-backups"
         self.hook = self.core / "integrations/hook.py"
 
@@ -169,6 +190,12 @@ def hook_targets(paths: Paths, providers: set) -> list:
     return targets
 
 
+def state_problem(paths: Paths) -> str | None:
+    if paths.state.is_symlink() or (paths.state.exists() and not paths.state.is_dir()):
+        return f"refusing to move {paths.state}: it is not a plain folder"
+    return None
+
+
 def legacy_candidates(paths: Paths, providers: set) -> list:
     found = []
     if "claude" in providers:
@@ -189,10 +216,19 @@ def install(paths: Paths, providers: set) -> int:
     if "claude" in providers:
         for name in CLAUDE_COMMANDS:
             src, dst = SOURCE / "integrations/claude" / f"{name}.md", paths.claude / "commands" / f"{name}.md"
-            legacy_ok = name in LEGACY_COMMANDS and is_legacy(dst)
-            if dst.is_symlink() or (dst.exists() and not own_command(src, dst) and not legacy_ok):
+            if dst.is_symlink() or (dst.exists() and not own_command(name, src, dst)):
                 problems.append(f"refusing to overwrite unrecognised {dst}")
             commands.append((src, dst))
+    retired = []
+    if "claude" in providers:
+        for name in RETIRED_COMMANDS:
+            dst = paths.claude / "commands" / f"{name}.md"
+            if not (dst.exists() or dst.is_symlink()):
+                continue
+            if retired_command(name, dst):
+                retired.append(dst)
+            else:
+                problems.append(f"refusing to retire unrecognised {dst}: move it away, then install again")
     legacy, foreign = [], []
     for path in legacy_candidates(paths, providers):
         (legacy if not path.is_symlink() and is_legacy(path) else foreign).append(path)
@@ -212,6 +248,8 @@ def install(paths: Paths, providers: set) -> int:
     # Apply.
     for path in legacy:
         tx.move_aside(path, "legacy response-history artifact")
+    for path in retired:
+        tx.move_aside(path, "retired command")
     wanted = release_files()
     if paths.core.exists():
         current = sorted(p.relative_to(paths.core) for p in paths.core.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
@@ -224,7 +262,7 @@ def install(paths: Paths, providers: set) -> int:
         if dst.exists() and filecmp.cmp(src, dst, shallow=False):
             continue
         if dst.exists():
-            tx.move_aside(dst, "legacy response-history command")
+            tx.move_aside(dst, "previous command version")
         tx.create(dst, lambda d, src=src: shutil.copy2(src, d))
     for file, before, after in configs:
         if after != before:
@@ -236,12 +274,12 @@ def install(paths: Paths, providers: set) -> int:
         print(line)
     print(f"Changes recorded in {backup} (undo: python3 install.py --rollback {backup})" if backup else "Already installed; nothing changed.")
     if "claude" in providers:
-        print("Claude Code: start a new session, then use /ls-responses, /copy-responses, "
-              "/store-history NAME [\"NOTE\"] and /retrieve-history [NAME].")
+        print("Claude Code: start a new session, then use /history-list, /history-copy, /history-store "
+              "and /history-use list.")
     if "codex" in providers:
         print("Codex: 1. start or restart Codex  2. run /hooks  3. review and trust the "
-              "agent-response-history UserPromptSubmit hook. Until it is trusted, $copy-responses is not intercepted. "
-              "Stored sessions: $store-history NAME [\"NOTE\"], $retrieve-history list, $retrieve-history NAME.")
+              "agent-response-history UserPromptSubmit hook. Until it is trusted, the $history-* commands are not "
+              "intercepted. Then use, for example: $history-list 10, $history-copy -1, $history-use list, $history-store home.")
     return 0
 
 
@@ -256,15 +294,24 @@ def uninstall(paths: Paths) -> int:
                 print(f"Nothing changed: cannot safely edit {file}", file=sys.stderr)
                 return 1
             configs.append((file, data, with_hook(data, event, None, paths.hook)))
+    if state_problem(paths):
+        print(f"Nothing changed: {state_problem(paths)}", file=sys.stderr)
+        return 1
     for file, before, after in configs:
         if after != before:
             tx.write_json(file, after)
     for name in CLAUDE_COMMANDS:
         dst = paths.claude / "commands" / f"{name}.md"
-        if not dst.is_symlink() and own_command(SOURCE / "integrations/claude" / f"{name}.md", dst):
+        if own_command(name, SOURCE / "integrations/claude" / f"{name}.md", dst):
             tx.move_aside(dst, "uninstalled command")
+    for name in RETIRED_COMMANDS:  # only recognised leftovers; anything else under these names is not ours
+        dst = paths.claude / "commands" / f"{name}.md"
+        if retired_command(name, dst):
+            tx.move_aside(dst, "retired command")
     if paths.core.exists() and not paths.core.is_symlink():
         tx.move_aside(paths.core, "uninstalled shared helper")
+    if paths.state.exists():  # kept in the backup, so rolling back the uninstall restores it
+        tx.move_aside(paths.state, "response-source state")
     backup = tx.commit()
     print(f"Uninstalled; recorded in {backup} (undo: python3 install.py --rollback {backup})" if backup else "Nothing to uninstall.")
     return 0
@@ -282,10 +329,15 @@ def rollback(paths: Paths, backup: Path) -> int:
         occupants = {str(p) for p in ([path] if path.is_file() else path.rglob("*")) if p.is_file()} if path.exists() else set()
         if path.is_symlink() or not occupants <= created:
             problems.append(f"{path} was changed after this run; move it away first")
+    clears_state = manifest["action"] == "install"  # the release being restored may not understand source state
+    if clears_state and state_problem(paths):
+        problems.append(state_problem(paths))
     if problems:
         print("\n".join(["Nothing changed:"] + problems), file=sys.stderr)
         return 1
     tx = Transaction(paths, "rollback")
+    if clears_state and paths.state.exists():  # cleared before the older release is restored, kept in the backup
+        tx.move_aside(paths.state, "response-source state (cleared by rollback)")
     for path in map(Path, reversed(manifest["created_files"])):
         if path.exists():
             tx.move_aside(path, f"created by {backup.name}")

@@ -23,3 +23,7 @@ class Turn:
 
 class TranscriptError(ValueError):
     pass
+
+
+class UserError(ValueError):
+    """A mistake in what was typed, or a refusal; its message is written for the person and is safe to show."""

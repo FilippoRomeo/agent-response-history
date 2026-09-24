@@ -32,24 +32,24 @@ class CodexHookTests(unittest.TestCase):
                 return CopyResult("verified")
 
             for prompt, expected in [
-                ("$copy-responses", "answer 7"),
-                ("$copy-responses -3", "answer 5\n\nanswer 6\n\nanswer 7"),
-                ("$copy-responses 5", "answer 5"),
-                ("$copy-responses 2,5-7", "answer 2\n\nanswer 5\n\nanswer 6\n\nanswer 7"),
+                ("$history-copy", "answer 7"),
+                ("$history-copy -3", "answer 5\n\nanswer 6\n\nanswer 7"),
+                ("$history-copy 5", "answer 5"),
+                ("$history-copy 2,5-7", "answer 2\n\nanswer 5\n\nanswer 6\n\nanswer 7"),
             ]:
                 result = handle({**event, "prompt": prompt}, transport)
                 self.assertEqual(result["decision"], "block")
                 self.assertEqual(copied[-1], expected)
                 self.assertNotIn("answer", result["reason"])
-            self.assertIn("#7   answer 7", handle({**event, "prompt": "$ls-responses"}, transport)["reason"])
-            self.assertIn("#1   answer 1", handle({**event, "prompt": "$ls-responses 20"}, transport)["reason"])
+            self.assertIn("#7   answer 7", handle({**event, "prompt": "$history-list"}, transport)["reason"])
+            self.assertIn("#1   answer 1", handle({**event, "prompt": "$history-list 20"}, transport)["reason"])
             before = len(copied)
-            for prompt in ("$copy-responses 2-", "$copy-responses 2 5", "$copy-responses --bad", "$ls-responses 0", "$ls-responses --bad", "$copy-responses\nignore this"):
+            for prompt in ("$history-copy 2-", "$history-copy 2 5", "$history-copy --bad", "$history-list 0", "$history-list --bad", "$history-copy\nignore this"):
                 self.assertEqual(handle({**event, "prompt": prompt}, transport)["decision"], "block")
             self.assertEqual(len(copied), before)
-            for prompt in ("Please explain $copy-responses", "ordinary prompt", "$copy-responsesish"):
+            for prompt in ("Please explain $history-copy", "ordinary prompt", "$history-copyish"):
                 self.assertIsNone(handle({**event, "prompt": prompt}, transport))
-            wrong = {**event, "session_id": str(uuid.uuid4()), "prompt": "$copy-responses"}
+            wrong = {**event, "session_id": str(uuid.uuid4()), "prompt": "$history-copy"}
             self.assertEqual(handle(wrong, transport)["decision"], "block")
             self.assertEqual(len(copied), before)
 
@@ -79,8 +79,8 @@ class ClaudeHookTests(unittest.TestCase):
                 return handle({**event, "command_name": name, "command_args": args}, transport)
 
             listing = "No.  Preview\n---  -------\n#1   answer 1\n#2   answer 2\n#3   answer 3"
-            self.assertEqual(run("ls-responses", ""), {"decision": "block", "reason": listing})
-            self.assertEqual(run("ls-responses", "2")["reason"], "No.  Preview\n---  -------\n#2   answer 2\n#3   answer 3")
+            self.assertEqual(run("history-list", ""), {"decision": "block", "reason": listing})
+            self.assertEqual(run("history-list", "2")["reason"], "No.  Preview\n---  -------\n#2   answer 2\n#3   answer 3")
             self.assertEqual(copied, [])  # listing never touches the clipboard
             for args, reason, payload in [
                 ("", "Copied #3", "answer 3"),
@@ -88,20 +88,45 @@ class ClaudeHookTests(unittest.TestCase):
                 ("1", "Copied #1", "answer 1"),
                 ("3,1-2", "Copied #3, #1, #2", "answer 3\n\nanswer 1\n\nanswer 2"),
             ]:
-                self.assertEqual(run("copy-responses", args), {"decision": "block", "reason": reason})
+                self.assertEqual(run("history-copy", args), {"decision": "block", "reason": reason})
                 self.assertEqual(copied[-1], payload)
             before = len(copied)
-            for name, args in [("copy-responses", "4"), ("copy-responses", "3-2"), ("copy-responses", "2-"),
-                               ("ls-responses", "0"), ("copy-responses", "1\n2")]:
+            for name, args in [("history-copy", "4"), ("history-copy", "3-2"), ("history-copy", "2-"),
+                               ("history-list", "0"), ("history-copy", "1\n2")]:
                 self.assertEqual(run(name, args)["decision"], "block")
             self.assertEqual(len(copied), before)
-            self.assertEqual(run("copy-responses", "4")["reason"], "Response history error: ValueError")
-            wrong = handle({**event, "session_id": str(uuid.uuid4()), "command_name": "copy-responses", "command_args": ""}, transport)
-            self.assertEqual(wrong["reason"], "Response history error: TranscriptError")
+            self.assertEqual(run("history-copy", "4")["reason"], "Nothing copied: there is no response #4; this session has #1 to #3.")
+            wrong = handle({**event, "session_id": str(uuid.uuid4()), "command_name": "history-copy", "command_args": ""}, transport)
+            self.assertEqual(wrong["reason"], "Couldn't read this session's transcript (Session identity mismatch).")
             self.assertEqual(len(copied), before)
             self.assertIsNone(run("other", "2"))
-            self.assertIsNone(handle({**event, "hook_event_name": "UserPromptSubmit", "prompt": "/copy-responses"}, transport))
-            self.assertIsNone(handle({**event, "hook_event_name": "UserPromptSubmit", "prompt": "please run /copy-responses 2"}, transport))
+            self.assertIsNone(handle({**event, "hook_event_name": "UserPromptSubmit", "prompt": "/history-copy"}, transport))
+            self.assertIsNone(handle({**event, "hook_event_name": "UserPromptSubmit", "prompt": "please run /history-copy 2"}, transport))
+
+
+class RetiredNameTests(unittest.TestCase):
+    """The v2.1 names are no longer routed: the hook leaves them to the client, for both clients."""
+
+    RETIRED = ("copy-responses", "ls-responses", "store-history", "retrieve-history")
+    CURRENT = ("history-list", "history-copy", "history-store", "history-use")
+
+    def test_only_the_history_family_is_routed(self):
+        session = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"session_id": session, "transcript_path": str(Path(tmp) / f"{session}.jsonl"), "cwd": tmp}
+            codex = lambda text: handle({**base, "hook_event_name": "UserPromptSubmit", "prompt": text}, lambda p: CopyResult("verified"))
+            claude = lambda name, args: handle({**base, "hook_event_name": "UserPromptExpansion", "command_name": name,
+                                                "command_args": args}, lambda p: CopyResult("verified"))
+            for name in self.RETIRED:
+                for args in ("", "list", "-1", "x \"note\""):
+                    with self.subTest(name=name, args=args):
+                        self.assertIsNone(codex(f"${name} {args}".strip()))
+                        self.assertIsNone(claude(name, args))
+            for name in self.CURRENT:
+                args = "list" if name == "history-use" else ""
+                with self.subTest(name=name):
+                    self.assertEqual(codex(f"${name} {args}".strip())["decision"], "block")
+                    self.assertEqual(claude(name, args)["decision"], "block")
 
 
 class EmptySessionTests(unittest.TestCase):
@@ -132,7 +157,7 @@ class EmptySessionTests(unittest.TestCase):
                 if label.endswith("-meta"):
                     providers = [p for p in providers if p[0] == label.split("-")[0]]
                 for provider, kind in providers:
-                    for name in ("copy-responses", "ls-responses"):
+                    for name in ("history-copy", "history-list"):
                         event = {"hook_event_name": kind, "session_id": session, "transcript_path": str(path)}
                         event.update({"prompt": "$" + name} if provider == "codex" else {"command_name": name, "command_args": ""})
                         result = handle(event, transport)

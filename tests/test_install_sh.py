@@ -174,7 +174,7 @@ class InstallShTests(unittest.TestCase):
     def test_install_py_failure_propagates(self):
         h = self.home("k")
         (h / ".claude/commands").mkdir(parents=True)
-        (h / ".claude/commands/ls-responses.md").write_text("my own command")
+        (h / ".claude/commands/history-list.md").write_text("my own command")
         r = self.run_sh("--home", str(h))
         self.assertEqual(r.returncode, 1)
         self.assertIn("refusing to overwrite", r.stderr)

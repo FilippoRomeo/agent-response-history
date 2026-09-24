@@ -1,6 +1,6 @@
 ---
-description: List numbered complete responses from this Claude Code session
-argument-hint: "[count]"
+description: List numbered complete responses from this session or the stored session in use
+argument-hint: "[N | -N]"
 disable-model-invocation: true
 ---
 The agent-response-history hook did not run in this client, so nothing was listed.

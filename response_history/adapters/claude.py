@@ -6,7 +6,8 @@ def _helper(content) -> bool:
     if not isinstance(content, str):
         return False
     return any(f"<command-name>/{name}</command-name>" in content
-               for name in ("copy-responses", "ls-responses", "copy-response", "copy", "store-history", "retrieve-history"))
+               for name in ("copy-responses", "ls-responses", "copy-response", "copy", "store-history", "retrieve-history",
+                            "history-list", "history-copy", "history-store", "history-use"))
 
 
 def _tool_result(content) -> bool:

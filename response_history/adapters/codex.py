@@ -3,7 +3,7 @@ from response_history.model import Turn, TranscriptError
 from response_history.adapters.common import prompt_text, visible_parts
 
 
-_HELPER = re.compile(r"^(?:\$(?:copy-responses|ls-responses|store-history|retrieve-history)|/(?:prompts:)?(?:copy-responses|ls-responses|copy-response|copy|store-history|retrieve-history))(?:\s|$)")
+_HELPER = re.compile(r"^(?:\$(?:copy-responses|ls-responses|store-history|retrieve-history|history-list|history-copy|history-store|history-use)|/(?:prompts:)?(?:copy-responses|ls-responses|copy-response|copy|store-history|retrieve-history))(?:\s|$)")
 _NON_TEXT_EVENTS = {
     "item_started", "token_count", "thread_settings_applied",
     "exec_command_begin", "exec_command_output_delta", "exec_command_end",

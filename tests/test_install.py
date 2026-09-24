@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK = ".local/share/agent-response-history/integrations/hook.py"
 SESSIONS = ".local/share/agent-response-history-sessions"
 V1_0_1 = "561b8c86dc7fb46c5a108304783319b7389f3428"
-MATCHER = "copy-responses|ls-responses|store-history|retrieve-history"
+MATCHER = "history-list|history-copy|history-store|history-use"
 
 
 def snapshot(home: Path) -> dict:
@@ -104,7 +104,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual((self.home / f".claude/commands/{name}.md").read_bytes(),
                              (ROOT / f"integrations/claude/{name}.md").read_bytes())
         self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()),
-                         ["copy-responses.md", "ls-responses.md", "retrieve-history.md", "store-history.md"])
+                         ["history-copy.md", "history-list.md", "history-store.md", "history-use.md"])
         self.assertEqual([g["matcher"] for g in ours(self.home / ".claude/settings.json", "UserPromptExpansion")], [MATCHER])
         settings = json.loads((self.home / ".claude/settings.json").read_text())
         self.assertEqual(settings["model"], "x")
@@ -130,9 +130,14 @@ class InstallTests(unittest.TestCase):
 
     def test_fallback_commands_fail_closed(self):
         # Where the hook does not run, the command file is all the model sees: it must never imply success.
-        for name, nothing in (("copy-responses", "nothing was copied"), ("ls-responses", "nothing was listed"),
-                              ("store-history", "nothing was stored"), ("retrieve-history", "nothing was retrieved")):
-            body = (ROOT / f"integrations/claude/{name}.md").read_text().split("---", 2)[2]
+        hints = {"history-list": "[N | -N]", "history-copy": "[-1..-10 | N | N1,N2-N3]",
+                 "history-store": "[home | PATH] [--note TEXT] [--name NAME]", "history-use": "[list | live | NAME | PATH]"}
+        self.assertEqual(sorted(p.stem for p in (ROOT / "integrations/claude").glob("*.md")), sorted(install.CLAUDE_COMMANDS))
+        for name, nothing in (("history-copy", "nothing was copied"), ("history-list", "nothing was listed"),
+                              ("history-store", "nothing was stored"), ("history-use", "no stored session was selected")):
+            head, body = (ROOT / f"integrations/claude/{name}.md").read_text().split("---", 2)[1:]
+            self.assertIn(f'argument-hint: "{hints[name]}"', head)
+            self.assertIn("disable-model-invocation: true", head)
             self.assertIn("hook did not run", body)
             self.assertIn(nothing, body)
             self.assertNotIn("$ARGUMENTS", body)
@@ -147,12 +152,16 @@ class InstallTests(unittest.TestCase):
             "Copy complete responses from this Claude Code session", "[-1..-10 | n | n1,n2-n3]"))
         write(self.home / ".claude/commands/ls-responses.md", v100.format(
             "List numbered complete responses from this Claude Code session", "[count]"))
-        self.assertEqual({install.sha256(p) for p in (self.home / ".claude/commands").iterdir()}, install.PREVIOUS_COMMANDS)
+        for name in ("copy-responses", "ls-responses"):
+            self.assertIn(install.sha256(self.home / f".claude/commands/{name}.md"), install.RETIRED_COMMANDS[name])
         code, out = run(self.home, "--provider", "claude")
         self.assertEqual(code, 0, out)
-        for name in ("copy-responses", "ls-responses"):
-            self.assertEqual((self.home / f".claude/commands/{name}.md").read_bytes(),
-                             (ROOT / f"integrations/claude/{name}.md").read_bytes())
+        self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()),
+                         sorted(f"{name}.md" for name in install.CLAUDE_COMMANDS))
+        backup = Path(out.split("--rollback ")[1].split(")")[0])
+        moved = json.loads((backup / "MANIFEST.json").read_text())["moved"]
+        self.assertEqual(sorted(Path(e["from"]).name for e in moved if e["reason"] == "retired command"),
+                         ["copy-responses.md", "ls-responses.md"])
         write(self.home / ".claude/commands/ls-responses.md", v100.format(  # uninstall recognises 1.0.0 files
             "List numbered complete responses from this Claude Code session", "[count]"))
         write(self.home / ".claude/commands/copy-responses.md", "someone else's command")
@@ -202,11 +211,8 @@ class InstallTests(unittest.TestCase):
         before = snapshot(self.home)
         code, out = run(self.home, "--provider", "both")
         self.assertEqual(code, 0, out)
-        for rel in legacy:
-            if rel != ".claude/commands/copy-responses.md":
-                self.assertFalse((self.home / rel).exists(), rel)
-        self.assertEqual((self.home / ".claude/commands/copy-responses.md").read_bytes(),
-                         (ROOT / "integrations/claude/copy-responses.md").read_bytes())
+        for rel in legacy:  # all moved aside; the retired copy-responses name is not reinstalled
+            self.assertFalse((self.home / rel).exists(), rel)
         for rel, text in unrelated.items():
             self.assertEqual((self.home / rel).read_text(), text)
         self.assertIn("left untouched (not recognised as response-history)", out)
@@ -222,11 +228,18 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(snapshot(self.home), before)
 
     def test_refuses_unknown_command_and_bad_json(self):
-        write(self.home / ".claude/commands/ls-responses.md", "my own command")
+        write(self.home / ".claude/commands/ls-responses.md", "my own command")  # retired name, unrecognised content
         before = snapshot(self.home)
         code, out = run(self.home, "--provider", "claude")
         self.assertEqual((code, snapshot(self.home)), (1, before))
-        self.assertIn("refusing to overwrite", out)
+        self.assertIn("refusing to retire unrecognised", out)
+        self.assertFalse((self.home / ".local/share").exists())
+        (self.home / ".claude/commands/ls-responses.md").unlink()
+        write(self.home / ".claude/commands/history-list.md", "my own command")  # current name, someone else's file
+        before = snapshot(self.home)
+        code, out = run(self.home, "--provider", "claude")
+        self.assertEqual((code, snapshot(self.home)), (1, before))
+        self.assertIn("refusing to overwrite unrecognised", out)
         self.assertFalse((self.home / ".local/share").exists())
         write(self.home / ".codex/hooks.json", "{not json")
         code, out = run(self.home, "--provider", "codex")
@@ -241,7 +254,7 @@ class InstallTests(unittest.TestCase):
         code, out = run(self.home, "--uninstall")
         self.assertEqual(code, 0, out)
         self.assertFalse((self.home / ".local/share/agent-response-history").exists())
-        self.assertFalse((self.home / ".claude/commands/copy-responses.md").exists())
+        self.assertFalse((self.home / ".claude/commands/history-copy.md").exists())
         self.assertEqual(json.loads((self.home / ".codex/hooks.json").read_text()),
                          {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}})
         self.assertEqual(json.loads((self.home / ".claude/settings.json").read_text()), {})
@@ -253,7 +266,7 @@ class InstallTests(unittest.TestCase):
     def test_release_file_set(self):
         rels = {p.as_posix() for p in install.release_files()}
         self.assertEqual(rels, {"run.py", "integrations/hook.py"} | {
-            f"response_history/{name}.py" for name in ("__init__", "cli", "clipboard", "history_store", "model", "selection", "session", "transcript")} | {
+            f"response_history/{name}.py" for name in ("__init__", "cli", "clipboard", "archive", "history_store", "model", "selection", "session", "source", "transcript")} | {
             f"response_history/adapters/{name}.py" for name in ("__init__", "claude", "codex", "common")})
         self.assertEqual(run(self.home, "--provider", "both")[0], 0)
         self.assert_core_is_release()  # byte-identical to the branch source; no .md, tests, caches or .git
@@ -287,7 +300,7 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(install_backup.is_dir())
 
     def test_new_command_names_are_never_taken_over(self):
-        for name in ("store-history", "retrieve-history"):
+        for name in install.CLAUDE_COMMANDS:
             with self.subTest(name=name):
                 home = Path(self.tmp.name).resolve() / f"foreign-{name}"
                 dst = home / f".claude/commands/{name}.md"
@@ -309,12 +322,12 @@ class InstallTests(unittest.TestCase):
 
     def test_uninstall_leaves_modified_new_commands(self):
         self.assertEqual(run(self.home, "--provider", "claude")[0], 0)
-        mine = self.home / ".claude/commands/store-history.md"
+        mine = self.home / ".claude/commands/history-store.md"
         mine.write_text("my edited command\n")
         code, out = run(self.home, "--uninstall")
         self.assertEqual(code, 0, out)
         self.assertEqual(mine.read_text(), "my edited command\n")
-        self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()), ["store-history.md"])
+        self.assertEqual(sorted(p.name for p in (self.home / ".claude/commands").iterdir()), ["history-store.md"])
         self.assertEqual(json.loads((self.home / ".claude/settings.json").read_text()), {})
 
     def test_upgrade_from_real_v1_0_1_and_rollback(self):
@@ -343,8 +356,8 @@ class InstallTests(unittest.TestCase):
             self.assert_core_is_release()
             backup = Path(out.split("--rollback ")[1].split(")")[0])
             manifest = json.loads((backup / "MANIFEST.json").read_text())
-            self.assertEqual([e["reason"] for e in manifest["moved"]], ["previous shared helper"])
-            old_core = Path(manifest["moved"][0]["to"])
+            self.assertEqual(sorted(e["reason"] for e in manifest["moved"]), ["previous shared helper", "retired command", "retired command"])
+            old_core = Path(next(e for e in manifest["moved"] if e["reason"] == "previous shared helper")["to"])
             self.assertEqual(sorted(p.relative_to(old_core).as_posix() for p in old_core.rglob("*") if p.is_file()),
                              sorted(p.relative_to(v1).as_posix() for p in v1.rglob("*.py")
                                     if p.parts[len(v1.parts)] in ("response_history", "run.py") or p.relative_to(v1).as_posix() == "integrations/hook.py"))

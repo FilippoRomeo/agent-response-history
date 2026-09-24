@@ -1,6 +1,6 @@
 ---
-description: Store this Claude Code session under a name for this project
-argument-hint: "NAME [\"NOTE\"]"
+description: Store this session's responses for later use
+argument-hint: "[home | PATH] [--note TEXT] [--name NAME]"
 disable-model-invocation: true
 ---
 The agent-response-history hook did not run in this client, so nothing was stored.

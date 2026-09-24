@@ -212,11 +212,11 @@ class StoreTests(Env):
     def test_claude_exact_files(self):
         path, count, durable = self.store(note="Fixed rocket")
         self.assertEqual((path, count, durable), (self.project() / "rocket", 2, True))
-        self.assertEqual(sorted(p.name for p in path.iterdir()), ["meta.json", "replies.md"])
+        self.assertEqual(sorted(p.name for p in path.iterdir()), ["meta.json", "replies.md", "turns.jsonl"])
         self.assertEqual((path / "replies.md").read_text(encoding="utf-8"), CLAUDE_MD)
         meta = json.loads((path / "meta.json").read_bytes().decode("utf-8"))
         self.assertEqual(meta, {
-            "schema_version": 1, "name": "rocket", "note": "Fixed rocket", "provider": "claude",
+            "schema_version": 2, "name": "rocket", "note": "Fixed rocket", "provider": "claude",
             "session_id": self.claude_sid, "project_path": str(self.repo), "cwd": str(self.repo),
             "stored_at": NOW.astimezone().isoformat(timespec="seconds"), "reply_count": 2,
             "first_prompt_preview": "Fix the rocket ✓ ```py x = 1 ```", "last_reply_preview": "Camera done."})
@@ -316,7 +316,7 @@ class StoreTests(Env):
 
         with patch.object(history_store, "_write", failing), self.assertRaises(OSError):
             self.store()
-        self.assertEqual(calls, ["meta.json", "replies.md"])
+        self.assertEqual(calls, ["turns.jsonl", "meta.json", "replies.md"])
         self.assertEqual(list(self.project().iterdir()), [])  # no final dir, no temp dir
         self.store()  # the name is still free
 
@@ -330,52 +330,44 @@ class StoreTests(Env):
 
 
 class RetrieveTests(Env):
-    def test_listing(self):
-        self.assertEqual(history_store.listing(str(self.repo)), "No stored sessions for this project.")
+    def test_listing_order_and_partition(self):
+        listing = lambda cwd: history_store.use_listing("claude", str(cwd))  # noqa: E731
+        self.assertTrue(listing(self.repo).startswith("No stored sessions"))
         self.store("codex", "shader", now=NOW - timedelta(days=1))
         self.store("claude", "rocket-nav", note="Fixed rocket navigation")
         self.store("claude", "b-same", now=NOW - timedelta(days=1))
         other = self.base / "elsewhere"
         other.mkdir()
-        self.store(name="foreign", cwd=other)
+        self.store(name="foreign", cwd=other)  # another project's v2.1 store
         day = lambda d: d.astimezone().strftime("%d %b %Y")  # noqa: E731
-        self.assertEqual(history_store.listing(str(self.repo / "src")).splitlines(), [
-            "Name                 Client   Replies   Stored       What it did",
-            "-------------------  -------  --------  -----------  ----------------------------",
-            f"rocket-nav           Claude   2         {day(NOW)}  Fixed rocket navigation",
-            f"b-same               Claude   2         {day(NOW - timedelta(days=1))}  Fix the rocket ✓ ```py x = 1 ```",
-            f"shader               Codex    2         {day(NOW - timedelta(days=1))}  Debug the texture pipeline",
+        self.assertEqual(listing(self.repo / "src").splitlines(), [
+            "Name                 Where  Client   Replies   Stored       What it did",
+            "-------------------  -----  -------  --------  -----------  ----------------------------",
+            f"rocket-nav           v2.1   Claude   2         {day(NOW)}  Fixed rocket navigation",
+            f"b-same               v2.1   Claude   2         {day(NOW - timedelta(days=1))}  Fix the rocket ✓ ```py x = 1 ```",
+            f"shader               v2.1   Codex    2         {day(NOW - timedelta(days=1))}  Debug the texture pipeline",
         ])
 
-    def test_detail_available_and_missing(self):
+    def test_resume_available_and_missing(self):
         self.store(note="Fixed rocket")
         self.store("codex", "shader")
-        day = NOW.astimezone().strftime("%d %b %Y")
-        self.assertEqual(history_store.detail(str(self.repo), "rocket"), "\n".join([
-            "rocket", "Claude Code", "2 replies", f"Stored: {day}", f"Project: {self.repo}", "",
-            "Fixed rocket", "", "Session: AVAILABLE", "", "Reopen:",
-            f"cd '{self.repo}' && claude --resume '{self.claude_sid}'", "",
-            f"Archived replies: {self.project() / 'rocket' / 'replies.md'}"]))
-        codex_detail = history_store.detail(str(self.repo), "shader")
-        self.assertIn("\nDebug the texture pipeline\n", codex_detail)
-        self.assertIn(f"\ncd '{self.repo}' && codex resume '{self.codex_sid}'\n", codex_detail)
+        use = lambda name: history_store.use("claude", name, self.claude_sid, str(self.repo))  # noqa: E731
+        self.assertIn(f"\ncd '{self.repo}' && claude --resume '{self.claude_sid}'", use("rocket"))
+        self.assertIn(f"\ncd '{self.repo}' && codex resume '{self.codex_sid}'", use("shader"))
         self.codex_path.unlink()
-        missing = history_store.detail(str(self.repo), "shader")
-        self.assertIn("Session: MISSING", missing)
-        self.assertNotIn("Reopen", missing)
+        missing = use("shader")
+        self.assertIn("isn't on this machine any more", missing)
         self.assertNotIn("codex resume", missing)
         self.assertTrue((self.project() / "shader" / "replies.md").is_file())
-        with self.assertRaises(history_store.HistoryError):
-            history_store.detail(str(self.repo), "nope")
-        with self.assertRaises(history_store.HistoryError):
-            history_store.detail(str(self.repo), "../rocket")
+        self.assertTrue(use("nope").startswith("Nothing selected: no stored session named nope"))
+        self.assertTrue(use("../rocket").startswith("Nothing selected: ../rocket is not a stored session folder"))
 
     def test_shell_quoting(self):
         odd = self.base / "it's a $dir"
         odd.mkdir()
         self.store(cwd=odd)
-        line = history_store.detail(str(odd), "rocket").split("Reopen:\n")[1].splitlines()[0]
-        self.assertEqual(line, f"cd '{self.base}/it'\"'\"'s a $dir' && claude --resume '{self.claude_sid}'")
+        reply = history_store.use("claude", "rocket", self.claude_sid, str(odd))
+        self.assertIn(f"\ncd '{self.base}/it'\"'\"'s a $dir' && claude --resume '{self.claude_sid}'", reply)
 
 
 class HistoryHookTests(Env):
@@ -388,52 +380,63 @@ class HistoryHookTests(Env):
         return handle({"hook_event_name": "UserPromptSubmit", "session_id": self.codex_sid,
                        "transcript_path": str(self.codex_path), "cwd": str(cwd or self.repo), "prompt": prompt})
 
+    def here(self, name=""):
+        return history_store.here_root(str(self.repo)) / name
+
     def test_claude_commands(self):
-        result = self.claude("store-history", ' rocket "Fixed rocket" ')
-        self.assertEqual(result, {"decision": "block", "reason": f"Stored rocket (2 replies).\n{self.project() / 'rocket'}"})
-        self.assertEqual(json.loads((self.project() / "rocket/meta.json").read_text())["note"], "Fixed rocket")
-        self.assertIn("rocket               Claude", self.claude("retrieve-history", "")["reason"])
-        self.assertIn("claude --resume", self.claude("retrieve-history", "rocket")["reason"])
-        self.assertIn("already exists", self.claude("store-history", "rocket")["reason"])
+        result = self.claude("history-store", ' --name rocket --note "Fixed rocket" ')
+        self.assertEqual(result["reason"].splitlines()[:2], ["Stored rocket (2 replies).", str(self.here("rocket"))])
+        self.assertEqual(json.loads(self.here("rocket/meta.json").read_text())["note"], "Fixed rocket")
+        self.assertIn("rocket               here   Claude", self.claude("history-use", "list")["reason"])
+        self.assertIn("claude --resume", self.claude("history-use", "rocket")["reason"])
+        self.assertIn("already exists", self.claude("history-store", "--name rocket")["reason"])
+
+    def test_note_accepts_single_or_double_quotes(self):
+        self.claude("history-store", "--name one --note 'a note with \"inner\" quotes'")
+        self.codex('$history-store --name two --note "a note with \'inner\' quotes"')
+        notes = {n: json.loads(self.here(f"{n}/meta.json").read_text())["note"] for n in ("one", "two")}
+        self.assertEqual(notes, {"one": 'a note with "inner" quotes', "two": "a note with 'inner' quotes"})
+        self.assertIn("Nothing stored.", self.claude("history-store", "--name three unquoted note")["reason"])
 
     def test_codex_commands(self):
-        self.assertEqual(self.codex("$store-history shader")["reason"], f"Stored shader (2 replies).\n{self.project() / 'shader'}")
-        self.assertIn("shader               Codex", self.codex("$retrieve-history")["reason"])
-        self.assertEqual(self.codex("$retrieve-history list"), self.codex("$retrieve-history"))
-        self.assertEqual(self.codex("$retrieve-history  list "), self.codex("$retrieve-history"))
-        self.assertEqual(self.claude("retrieve-history", "list"), self.claude("retrieve-history", ""))
-        self.assertIn("Usage", self.codex("$retrieve-history list shader")["reason"])
-        self.assertIn("reserved", self.codex("$store-history list")["reason"])
-        self.assertIn("reserved", self.claude("store-history", 'list "x"')["reason"])
-        self.assertFalse((self.project() / "list").exists())
-        self.assertIn("codex resume", self.codex("$retrieve-history shader")["reason"])
+        self.assertEqual(self.codex("$history-store --name shader")["reason"].splitlines()[:2],
+                         ["Stored shader (2 replies).", str(self.here("shader"))])
+        self.assertIn("shader               here   Codex", self.codex("$history-use list")["reason"])
+        self.assertEqual(self.codex("$history-use  list "), self.codex("$history-use list"))
+        self.assertEqual(self.claude("history-use", "list"), self.claude("history-use", ""))
+        self.assertIn("Usage", self.codex("$history-use list shader")["reason"])
+        self.assertIn("reserved", self.codex("$history-store --name list")["reason"])
+        self.assertIn("reserved", self.claude("history-store", '--name LIVE --note "x"')["reason"])
+        self.assertFalse(self.here("list").exists())
+        self.assertIn("codex resume", self.codex("$history-use shader")["reason"])
 
     def test_malformed_rejected_locally(self):
-        for prompt in ("$store-history", "$store-history bad/name", "$store-history a b", '$store-history a "x',
-                       "$store-history a\nb", "$retrieve-history a b", "$retrieve-history ../x", "$store-history " + "x" * 65):
+        for prompt in ("$history-store --name bad/name", "$history-store a b", '$history-store --name "x', "$history-store --bogus",
+                       "$history-store a\nb", "$history-use a b", "$history-store --name " + "x" * 65):
             with self.subTest(prompt=prompt):
                 self.assertEqual(self.codex(prompt)["decision"], "block")
-        for args in ("", "a b", "bad/name", "a\nb"):
-            self.assertEqual(self.claude("store-history", args)["decision"], "block")
+        for args in ("a b", "--name bad/name", "a\nb", "--note"):
+            self.assertEqual(self.claude("history-store", args)["decision"], "block")
+        self.assertFalse(self.here().exists())
         self.assertFalse(history_store.store_root().exists())
         event = {"hook_event_name": "UserPromptSubmit", "session_id": self.codex_sid, "transcript_path": str(self.codex_path),
-                 "prompt": "$store-history x"}
+                 "prompt": "$history-store --name x"}
         self.assertEqual(handle(event)["reason"], "Response history session unavailable")  # no cwd
         self.assertEqual(handle({**event, "cwd": "relative"})["reason"], "Response history session unavailable")
 
     def test_prose_passes_through(self):
-        for prompt in ("please $store-history x", "$store-historyx", "$retrieve-historyx", "/store-history x", "ordinary",
-                       "$retrieve-history$retrieve-history list", "run $retrieve-history list"):
+        for prompt in ("please $history-store x", "$history-storex", "$history-usex", "/history-store x", "ordinary",
+                       "$history-use$history-use list", "run $history-use list", "$store-history x", "$retrieve-history list"):
             self.assertIsNone(self.codex(prompt), prompt)
-        self.assertIsNone(self.claude("store-historyx", "x"))
-        self.assertIsNone(handle({"hook_event_name": "UserPromptSubmit", "prompt": "/store-history x", "session_id": self.claude_sid}))
+        self.assertIsNone(self.claude("history-storex", "x"))
+        self.assertIsNone(self.claude("store-history", "x"))  # retired: no longer answered by the hook
+        self.assertIsNone(handle({"hook_event_name": "UserPromptSubmit", "prompt": "/history-store x", "session_id": self.claude_sid}))
 
     def test_fallback_command_files_fail_closed(self):
-        for name, verb in (("store-history", "stored"), ("retrieve-history", "retrieved")):
+        for name, outcome in (("history-store", "nothing was stored"), ("history-use", "no stored session was selected")):
             body = (ROOT / f"integrations/claude/{name}.md").read_text().split("---", 2)[2]
-            self.assertIn(f"The agent-response-history hook did not run in this client, so nothing was {verb}.", body)
+            self.assertIn(f"The agent-response-history hook did not run in this client, so {outcome}", body)
             self.assertIn("Do not run commands, read files", body)
-
 
 
 class PromptFilterTests(unittest.TestCase):
@@ -507,34 +510,40 @@ class DurabilityTests(Env):
             real(path)
         return patch.object(history_store, "_fsync_dir", fsync)
 
+    def run_store(self, args):
+        return history_store.run("claude", "history-store", args, self.claude_sid, str(self.claude_path), str(self.repo))
+
     def test_parent_fsync_failure_after_publish_reports_stored_with_warning(self):
-        with self.fail_fsync(lambda p: p == self.project()):
+        here = history_store.here_root(str(self.repo))
+        with self.fail_fsync(lambda p: p in (self.project(), here)):
             path, count, durable = self.store()
-            message = history_store.run("claude", "store-history", "second", self.claude_sid, str(self.claude_path), str(self.repo))
+            message = self.run_store("--name second")
         self.assertEqual((path, count, durable), (self.project() / "rocket", 2, False))
         self.assertEqual((path / "replies.md").read_text(encoding="utf-8"), CLAUDE_MD)
         self.assertEqual(json.loads((path / "meta.json").read_text(encoding="utf-8"))["reply_count"], 2)
         self.assertEqual(message.splitlines()[0], "Stored second (2 replies).")
         self.assertEqual(message.splitlines()[-1], "Warning: the session was stored, but filesystem durability could not be confirmed.")
         self.assertNotIn("error", message.lower())
-        self.assertEqual(sorted(p.name for p in self.project().iterdir()), ["rocket", "second"])  # no temp dir left
+        self.assertEqual(sorted(p.name for p in here.iterdir()), ["second"])  # no temp dir left
         with self.assertRaises(history_store.HistoryError):
             self.store()  # the name is taken: no duplicate
-        self.assertIn("already exists", history_store.run("claude", "store-history", "second", self.claude_sid,
-                                                          str(self.claude_path), str(self.repo)))
+        self.assertIn("already exists", self.run_store("--name second"))
 
     def test_fsync_failure_before_publish_stores_nothing(self):
+        here = history_store.here_root(str(self.repo))
         with self.fail_fsync(lambda p: p.name.startswith(".tmp-")):
             with self.assertRaises(OSError):
                 self.store()
-            message = history_store.run("claude", "store-history", "rocket", self.claude_sid, str(self.claude_path), str(self.repo))
+            message = self.run_store("--name rocket")
         self.assertEqual(message, "Stored-session error: OSError")
         self.assertEqual(list(self.project().iterdir()), [])  # no final dir, no temp dir
+        self.assertEqual(list(here.iterdir()), [])
         self.assertEqual(self.store()[:2], (self.project() / "rocket", 2))  # the name is still free
 
     def test_durable_store_has_no_warning(self):
-        message = history_store.run("claude", "store-history", "rocket", self.claude_sid, str(self.claude_path), str(self.repo))
-        self.assertEqual(message, f"Stored rocket (2 replies).\n{self.project() / 'rocket'}")
+        message = self.run_store("--name rocket")
+        self.assertEqual(message.splitlines()[:2], ["Stored rocket (2 replies).", str(history_store.here_root(str(self.repo)) / "rocket")])
+        self.assertNotIn("Warning", message)
 
 if __name__ == "__main__":
     unittest.main()
