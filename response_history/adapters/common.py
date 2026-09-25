@@ -1,3 +1,4 @@
+import io
 import json
 import re
 from pathlib import Path
@@ -13,7 +14,8 @@ def records(path: Path):
         if exc.reason != "unexpected end of data" or exc.end != len(data):
             raise TranscriptError("Invalid transcript UTF-8") from None
         text = data[:exc.start].decode("utf-8")
-    lines = text.splitlines(keepends=True)
+    # JSONL records end at "\n" only; splitlines() also breaks on U+2028/U+2029/U+0085, which JSON leaves raw.
+    lines = list(io.StringIO(text, newline="\n"))
     result = []
     for index, line in enumerate(lines):
         try:

@@ -501,6 +501,8 @@ def run(provider: str, command: str, args: str, session: str, transcript: str, c
         return _stored_reply(provider, cwd, folder, count, durable, meta)
     except HistoryError as exc:
         return str(exc)
-    except (OSError, UnicodeError, ValueError, TranscriptError) as exc:
+    except TranscriptError as exc:  # fixed messages from the parsers, never transcript text
+        return f"Stored-session error: {exc}"
+    except (OSError, UnicodeError, ValueError) as exc:
         # Do not echo exception details: filenames and transcript bodies may be private.
         return f"Stored-session error: {type(exc).__name__}"
