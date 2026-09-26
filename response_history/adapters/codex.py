@@ -34,7 +34,7 @@ def parse(rows, source: str) -> list[Turn]:
                     active.state = "incomplete" if explicit or active.evidence != "final_item" else "complete"
                 active = Turn("codex", source, data.get("turn_id"))
                 explicit = True
-                event_messages, response_messages = {}, {}
+                event_messages, response_messages, question_calls = {}, {}, set()
                 turns.append(active)
             elif name == "turn_aborted":
                 if active is not None:
@@ -104,7 +104,7 @@ def parse(rows, source: str) -> list[Turn]:
                             raise TranscriptError("Unmirrored Codex agent message")
                         active.state = "complete"
                     active = Turn("codex", source, active.identity if active is not None and explicit else None)
-                    event_messages, response_messages = {}, {}
+                    event_messages, response_messages, question_calls = {}, {}, set()
                     turns.append(active)
                 active.prompt = "\n\n".join(filter(None, (active.prompt, prompt_text(content))))  # steering joins its turn
                 if _HELPER.match(prompt.lstrip()) or "<name>copy-responses</name>" in prompt or "<name>ls-responses</name>" in prompt or "<!-- codex-response-history:" in prompt:

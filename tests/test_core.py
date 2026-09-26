@@ -179,6 +179,23 @@ class CodexTests(unittest.TestCase):
             with self.subTest(tool=tool, call_id=call_id), self.assertRaises(TranscriptError):
                 codex.parse(rows(tool, call_id), "s")
 
+    def test_user_input_question_exemption_is_per_turn(self):
+        first = [c_event("task_started"),
+                 {"type": "response_item", "payload": {"type": "function_call", "name": "request_user_input_async", "arguments": "{}", "call_id": "call_reused"}},
+                 c_event("item_completed", item={"type": "AgentMessage", "id": "call_reused", "phase": "final_answer",
+                                                 "content": [{"type": "Text", "text": "which option?"}]}),
+                 {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "call_reused", "output": "a"}},
+                 c_msg("done", "final_answer", id="m1"),
+                 c_event("task_complete", last_agent_message="done")]
+        self.assertEqual([t.text for t in codex.parse(first, "s") if t.selectable], ["done"])
+        second = [c_event("task_started"),
+                  c_event("item_completed", item={"type": "AgentMessage", "id": "call_reused", "phase": "final_answer",
+                                                  "content": [{"type": "Text", "text": "unmirrored"}]}),
+                  c_msg("later", "final_answer", id="m2"),
+                  c_event("task_complete", last_agent_message="later")]
+        with self.assertRaisesRegex(TranscriptError, "^Unmirrored Codex agent message$"):
+            codex.parse(first + second, "s")
+
 
 class ClaudeTests(unittest.TestCase):
     def test_completed_and_tool_continuation(self):
