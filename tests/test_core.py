@@ -157,6 +157,28 @@ class CodexTests(unittest.TestCase):
         with self.assertRaises(TranscriptError):
             codex.parse(rows, "s")
 
+    def test_user_input_question_is_not_a_reply(self):
+        # Sanitized shape of Codex 0.155 request_user_input_async: the question is an AgentMessage
+        # event keyed by the tool call id, with no mirrored response message.
+        def rows(tool="request_user_input_async", call_id="call_q1"):
+            return [c_event("task_started"),
+                    c_event("item_completed", item={"type": "AgentMessage", "id": "m1", "phase": "commentary",
+                                                    "content": [{"type": "Text", "text": "progress"}]}),
+                    c_msg("progress", "commentary", id="m1"),
+                    {"type": "response_item", "payload": {"type": "function_call", "name": tool, "arguments": "{}", "call_id": call_id}},
+                    c_event("item_completed", item={"type": "AgentMessage", "id": "call_q1", "phase": "final_answer", "delivery": "async",
+                                                    "content": [{"type": "Text", "text": "which option?"}],
+                                                    "questions": [{"title": "which option?", "options": ["a", "b"]}]}),
+                    {"type": "response_item", "payload": {"type": "function_call_output", "call_id": call_id, "output": "a"}},
+                    c_event("item_completed", item={"type": "AgentMessage", "id": "m2", "phase": "final_answer",
+                                                    "content": [{"type": "Text", "text": "done"}]}),
+                    c_msg("done", "final_answer", id="m2"),
+                    c_event("task_complete", last_agent_message="done")]
+        self.assertEqual([t.text for t in codex.parse(rows(), "s") if t.selectable], ["progress\n\ndone"])
+        for tool, call_id in (("other_tool", "call_q1"), ("request_user_input_async", "call_other")):
+            with self.subTest(tool=tool, call_id=call_id), self.assertRaises(TranscriptError):
+                codex.parse(rows(tool, call_id), "s")
+
 
 class ClaudeTests(unittest.TestCase):
     def test_completed_and_tool_continuation(self):

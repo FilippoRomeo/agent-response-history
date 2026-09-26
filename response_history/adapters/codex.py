@@ -17,6 +17,7 @@ def parse(rows, source: str) -> list[Turn]:
     explicit = False
     event_messages = {}
     response_messages = {}
+    question_calls = set()
     for row in rows:
         kind = row.get("type")
         data = row.get("payload")
@@ -76,6 +77,8 @@ def parse(rows, source: str) -> list[Turn]:
                         raise TranscriptError("Unsupported Codex agent item")
                     if any(not isinstance(part, dict) or part.get("type") != "Text" or not isinstance(part.get("text"), str) for part in content):
                         raise TranscriptError("Unsupported Codex agent item content")
+                    if identity in question_calls:
+                        continue  # a request_user_input_async question: no mirrored message, not a reply
                     if identity in event_messages:
                         raise TranscriptError("Duplicate Codex agent item")
                     event_messages[identity] = (item.get("phase"), "\n".join(part["text"] for part in content))
@@ -84,6 +87,8 @@ def parse(rows, source: str) -> list[Turn]:
             continue
         if kind != "response_item":
             continue
+        if name == "function_call" and data.get("name") == "request_user_input_async":
+            question_calls.add(data.get("call_id"))
         if name != "message":
             continue
         role = data.get("role")
